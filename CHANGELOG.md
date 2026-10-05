@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.8-0](https://github.com/junjie73-blip/sync-upstream/compare/v0.2.7...v0.2.8-0) (2026-10-05)
+
+### 🐛 Bug Fixes | Bug 修复
+
+* 🐛 修复功能 ([6a5df0c](https://github.com/junjie73-blip/sync-upstream/commit/6a5df0cbfa9ce7a7fa168cfa6b68b3ce70a310f8))
+
 ## [0.2.7](https://github.com/flow-zy/sync-upstream/compare/v0.2.6...v0.2.7) (2025-08-18)
 
 ### ✨ Features | 新功能
