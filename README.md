@@ -1,224 +1,228 @@
 # sync-upstream
 
-🚀 **企业级上游代码同步管理工具**
+🚀 **目录级上游代码同步工具**
+
+把上游仓库中你关心的那几个目录，以**可预览、可审计、可回滚**的方式同步到你的分支，并且只碰这些目录。
+
+简体中文 | [English](README.en.md) · 文档站：[使用指南](https://flow-zy.github.io/sync-upstream/)（中文 / English）
 
 ---
 
-## 为什么需要 sync-upstream？
+## 为什么需要它
 
-在开源协作与企业开发中，您是否遇到过这些痛点？
-- 手动同步上游代码耗时耗力，容易出错
-- 全量复制浪费带宽和存储空间
-- 代码冲突难以解决，缺乏审计跟踪
-- 无法可靠地回滚到之前的同步状态
-- 团队协作中同步流程不透明
+维护开源分叉时，`git merge upstream/main` 会把上游的**全部**改动灌进来，而现实里你往往只想跟 `src/config`、`packages/utils` 这几个目录：
 
-**sync-upstream** 应运而生，专为解决这些问题而设计。
+- 手工复制文件容易漏、容易覆盖本地定制代码，且没有审计痕迹
+- 用临时分支 + 临时目录做同步，一旦中断就会留下脏状态
+- 预览说改了 100 个文件，实际提交只有 98 个，差在哪没人说得清
+- 冲突只能靠肉眼看，没有"保留本地 / 采用上游 / 三方合并"的策略选择
 
----
+sync-upstream 的三条承诺：**只碰你列出的目录**、**预览看到的每一条就是提交里的每一条**、**不建临时分支也不建临时目录，中断了重跑就行**。
 
-## 什么是 sync-upstream？
+如果你正在考虑"GitHub / Gitee 的 Fetch upstream 一个按钮就行了，为什么要装工具"，看 [与 fork 同步的对比](docs/guide/vs-fork-sync.md)——里面有逐条例子，也写明了哪些场景确实不该用它。
 
-sync-upstream 是一款面向企业与开源团队的**上游代码生命周期管理**工具。它能够将开源仓库的更新，以**增量、并行、可审计、可回滚**的方式，安全地同步到您的私有分支。
-
-无论是维护企业内部的开源分叉版本，还是定期合并上游社区的更新，sync-upstream 都能让这个过程变得简单、可靠且高效。
-
-> **注意**：运行此工具前，确保当前目录已使用 Git 初始化。
+> 运行前提：当前目录已经是一个 Git 仓库（`git init` 即可），且目标分支已存在。
 
 ---
 
 ## 核心特性
 
-### 🔄 智能同步引擎
-- **增量哈希 diff**：仅同步变更文件，节省带宽和时间
-- **并行文件处理**：自适应并发（CPU×2，上限 64），大幅提升处理速度
-- **大文件支持**：LFS / Git-Annex 集成，轻松处理 2GB+ 二进制文件
-- **高级缓存系统**：LRU 缓存淘汰策略 + 大小限制 + 过期清理，进一步提升性能
-- **智能哈希缓存**：文件哈希值缓存，减少重复计算开销
+### 同步
+- **目录级作用域**：只同步 `syncDirs` 列出的路径（目录或单个文件均可），范围外的文件不会被读取、修改或提交
+- **预览等于结果**：`-P` / `-n` 只列出这次要新增/修改/删除的路径，不动工作区、不切分支、不提交（仍会拉取上游，离线会失败）
+- **增量运行**：`--incremental` 跳过上次已同步的内容，只处理之后变化的文件；`--force` 忽略基线重新全量比对
+- **失败不扩散**：文件多时批量应用，个别文件失败只标记该文件并保留原因，其余照常完成，修好重跑即可
+- **专属 remote**：上游以名为 `sync-upstream` 的 remote 拉取，绝不改写你的 `origin`
 
-### 🔐 安全与合规
-- **多认证方式**：支持 SSH / PAT / GitHub App / OIDC
-- **最小权限原则**：临时凭证/短期令牌，自动过期
-- **Policy-as-Code**：许可证扫描、敏感词拦截（即将上线）
-- **审计日志**：完整记录同步过程，支持 Prometheus + Jaeger（即将上线）
+### 冲突处理
+- 自动识别 4 类冲突：内容都改（`content`）、一边删一边改（`delete-modify`）、本地未跟踪文件将被覆盖（`untracked-overwrite`）、文件与目录同名（`type`）
+- 5 种解决策略：`use-source`、`keep-target`、`auto-merge`、`prompt-user`、`skip`
+- `auto-merge` 会尝试自动合并双方的行级改动，合不上时写入冲突标记交给你处理，而不是静默丢弃
+- 二进制文件与超大文本不尝试自动合并，只跳过该文件，不影响同批其他文件
 
-### 🧩 灵活配置
-- **多格式支持**：JS/JSON/YAML/TOML，自动探测 `.sync-toolrc.*`
-- **多环境管理**：开发/测试/生产环境配置分离与一键切换（开发中）
-- **声明式冲突解决**：YAML 策略引擎，支持文件级/目录级/语义级冲突处理
-- **分支策略自动化**：基于规则自动创建和管理分支，支持FEATURE、RELEASE、HOTFIX和DEVELOP四种策略
+### 发布控制
+- **灰度发布**：按百分比 / 目录 / 文件模式先发布一小批，重跑同一比例得到的是同一批文件
+- **一键全量 / 回滚**：`--full-release` 补齐剩下的文件；`--rollback` 把已发布的内容退回发布前——新提交一条回滚提交，不改写已推送的历史
+- **审计**：阶段变迁追加写入 `.sync-gray-audit.jsonl`，可随时改路径
 
-### 🚀 高效协作
-- **灰度发布 & 一键回滚**：dry-run → canary → full → revert（已完成，查看 [FEATURES_DETAILED.md](FEATURES_DETAILED.md) 获取详细说明）
-- **Web Dashboard**：实时落后 commit 数、一键审批（即将上线）
-- **CI/CD 集成**：与 GitHub Actions 等工具无缝集成（开发中）
-- **Webhook集成**：支持接收上游仓库的Webhook通知，实现自动触发同步（已完成）
-
----
-
-## 使用场景
-
-1. **企业开源分叉维护**
-   当您的团队基于开源项目创建了企业定制版本，需要定期合并上游更新时
-
-2. **多仓库协同开发**
-   当您需要从多个开源仓库中同步特定模块到您的项目中时
-
-3. **安全合规审核**
-   当您需要在同步过程中自动检测许可证合规性和敏感信息时
-
-4. **分布式团队协作**
-   当您的团队分布在不同地区，需要高效同步代码变更时
-
-5. **标准化开发流程**
-   当您需要自动创建和管理符合团队规范的分支（如特性分支、发布分支等）时
+### 配置与报错
+- **多格式配置**：JSON / JSON5 / YAML / TOML，自动探测 16 个候选文件名，`-C` 可显式指定
+- **失败即报错**：指定的配置文件不存在、无权限、解析失败都会终止并报出每种格式的失败原因，绝不静默回落到默认值
+- **聚合校验**：一次性列出所有配置问题（类型错误、路径非法、枚举拼错、区间越界），并对别名键、未识别键给出警告
+- **明确退出码**：0 成功 / 1 有文件应用失败或未预期错误 / 2 配置或参数问题 / 3 git 操作失败（4 为保留码）
+- **Webhook 守护模式**：支持 GitHub / GitLab / Bitbucket / Gitea，签名或 token 校验、IP 白名单、按 IP 限流、1 MiB 请求体上限
 
 ---
 
-## 30 秒极速上手
+## 30 秒上手
 
-### 1. 安装
 ```bash
 npm install -g sync-upstream
+
+cd /path/to/your-repo
+sync-upstream --generate-config          # 生成 sync-upstream.config.json
+# 编辑里面的 upstreamRepo / syncDirs / companyBranch
+sync-upstream --preview-only --verbose   # 先看计划
+sync-upstream                            # 再真正执行
 ```
 
-### 2. 一条命令运行（零配置）
+也可以零配置直接跑，工具会交互式询问缺少的字段：
+
 ```bash
-# 直接运行，工具会交互式询问上游地址、分支、目录
-sync-upstream
+sync-upstream -r https://github.com/vuejs/core.git -d packages/runtime-core -b main -c company/main
 ```
 
-### 3. 推荐单文件配置（sync.config.js）
-```js
-module.exports = {
-  upstreamRepo: 'https://github.com/vuejs/vue.git',
-  upstreamBranch: 'main',
-  companyBranch: 'company/main',
-  syncDirs: ['src', 'packages'],
-  ignorePatterns: ['node_modules', 'dist', '*.log'],
-  authConfig: { type: 'pat', token: process.env.GITHUB_TOKEN },
-  retryConfig: { maxRetries: 3, initialDelay: 2000, backoffFactor: 1.5 },
-  concurrencyLimit: 8,
-  forceOverwrite: false,
-  verbose: true,
-  dryRun: false,
-  // LFS 配置
-  useLFS: true,
-  largeFileThreshold: 5 * 1024 * 1024, // 5MB
-  lfsTrackPatterns: ['*.zip', '*.tar.gz', '*.pdf', '*.jpg', '*.png'],
-  // 缓存配置
-  useCache: true,
-  cacheDir: './.sync-cache',
-  cacheConfig: {
-    expiryMs: 7 * 24 * 60 * 60 * 1000, // 7天
-    maxSizeBytes: 512 * 1024 * 1024, // 512MB
-    lruEnabled: true,
-    lruMaxEntries: 1000
+脚本与 CI 里用 `-y` 跳过提问（配置需完整：`upstreamRepo` 与 `syncDirs` 都要有值，否则仍会进入补全问答）：
+
+```bash
+sync-upstream -C sync-upstream.config.json -y --push
+```
+
+---
+
+## 配置示例
+
+`sync-upstream.config.json`（下面是规范键名；历史别名仍会被识别，但会提示一次）：
+
+```json
+{
+  "upstreamRepo": "https://github.com/vuejs/core.git",
+  "upstreamBranch": "main",
+  "companyBranch": "company/main",
+  "syncDirs": ["packages/runtime-core", "packages/shared"],
+  "commitMessage": "chore(sync): sync runtime-core from upstream",
+  "ignorePatterns": ["**/__tests__/**", "*.log"],
+  "includeFileTypes": [".ts", ".vue"],
+  "concurrencyLimit": 10,
+  "forceOverwrite": true,
+  "autoPush": false,
+  "verbose": false,
+  "retryConfig": {
+    "maxRetries": 3,
+    "initialDelay": 2000,
+    "backoffFactor": 1.5
   },
-  // 分支策略配置
-  branchStrategyConfig: {
-    enable: true,
-    strategy: 'FEATURE', // 可选值: FEATURE, RELEASE, HOTFIX, DEVELOP
-    baseBranch: 'main',
-    branchPattern: 'feature/{name}', // 支持{name}, {date}, {author}等变量
-    autoSwitchBack: true,
-    autoDeleteMergedBranches: false
+  "conflictResolutionConfig": {
+    "defaultStrategy": "prompt-user",
+    "autoResolveTypes": [".md"],
+    "logResolutions": true
   },
-  // Webhook配置
-  webhookConfig: {
-    enable: true,
-    port: 3000,
-    path: '/webhook',
-    secret: 'your-secure-webhook-secret', // 生产环境中请使用环境变量
-    allowedEvents: ['push', 'pull_request'],
-    triggerBranch: 'main'
+  "authConfig": {
+    "type": "pat",
+    "username": "git",
+    "token": "read-from-env-or-credential-helper"
   }
 }
 ```
-保存后执行：
-```bash
-sync-upstream --config sync.config.js
-```
+
+YAML / TOML / JSON5 写法的键名完全一致；`.yaml` 版本可参考 [配置指南](docs/guide/configuration.md)。
 
 ---
 
 ## CLI 速查表
 
-| 参数 | 别名 | 类型 | 示例值 | 说明 |
-|---|---|---|---|---|
-| `--repo` | `-r` | `<url>` | `https://github.com/vuejs/vue.git` | 上游仓库 URL |
-| `--dirs` | `-d` | `<目录>` | `src,packages` | 要同步的目录，多个目录用逗号分隔 |
-| `--branch` | `-b` | `<分支>` | `main` | 上游分支 (默认: main) |
-| `--company-branch` | `-c` | `<分支>` | `company/main` | 公司仓库分支 (默认: main) |
-| `--message` | `-m` | `<消息>` | `"Sync upstream changes"` | 提交消息 |
-| `--push` | `-p` | `boolean` | 无 | 自动推送变更 |
-| `--force` | `-f` | `boolean` | 无 | 强制覆盖本地文件，不使用增量复制 (默认: true) |
-| `--verbose` | `-V` | `boolean` | 无 | 显示详细日志信息 |
-| `--silent` | `-s` | `boolean` | 无 | 静默模式，不输出日志 |
-| `--dry-run` | `-n` | `boolean` | 无 | 试运行模式，不实际执行同步操作 |
-| `--preview-only` | `-P` | `boolean` | 无 | 预览模式，只显示变更，不实际修改文件 |
-| `--config` | `-C` | `<路径>` | `sync.config.js` | 指定配置文件路径 |
-| `--config-format` | `-F` | `<格式>` | `json` | 配置文件格式 (json, yaml, toml) |
-| `--retry-max` | `--rm` | `<次数>` | `5` | 网络请求最大重试次数 (默认: 3) |
-| `--retry-delay` | `--rd` | `<毫秒>` | `3000` | 初始重试延迟时间 (默认: 2000) |
-| `--retry-backoff` | `--rb` | `<因子>` | `2` | 重试退避因子 (默认: 1.5) |
-| `--concurrency` | `--cl` | `<数量>` | `10` | 并行处理的最大文件数量 (默认: 5) |
-| `--version` | `-v` | `boolean` | 无 | 显示版本信息 |
-| `--help` | `-h` | `boolean` | 无 | 显示帮助信息 |
-| `--non-interactive` | `-y` | `boolean` | 无 | 非交互式模式，跳过所有确认提示 |
-| `--gray-release` | `-gr` | `boolean` | 无 | 启用灰度发布模式 |
-| `--full-release` | `-fr` | `boolean` | 无 | 执行全量发布 |
-| `--rollback` | `-ro` | `boolean` | 无 | 执行回滚操作 |
-| `--branch-strategy` | 无 | `<策略>` | `FEATURE` | 分支策略类型 (FEATURE, RELEASE, HOTFIX, DEVELOP) |
-| `--base-branch` | 无 | `<分支>` | `main` | 基础分支，用于创建新分支 |
-| `--branch-pattern` | 无 | `<模式>` | `feature/{name}` | 分支命名模式，支持{name}, {date}, {author}等变量 |
-| `--webhook-enable` | `-we` | `boolean` | 无 | 启用Webhook集成 |
-| `--webhook-port` | `-wp` | `<端口>` | `3000` | Webhook监听端口 |
-| `--webhook-path` | `-wpa` | `<路径>` | `/webhook` | Webhook路径 |
-| `--webhook-secret` | `-ws` | `<密钥>` | `your-secret` | Webhook验证密钥 |
-| `--webhook-events` | `-wev` | `<事件>` | `push,pull_request` | 允许的事件类型列表，多个事件用逗号分隔 |
-| `--webhook-branch` | `-wb` | `<分支>` | `main` | 触发同步的分支 |
+完整语义（默认值来源、参数组边界、与配置键的对应关系）见 [命令行参考](docs/reference/cli.md)，本表只做快速查询。
+
+| 参数 | 别名 | 类型 | 说明 |
+|---|---|---|---|
+| `--repo` | `-r` | `<url>` | 上游仓库 URL |
+| `--branch` | `-b` | `<分支>` | 上游分支（默认 `main`） |
+| `--company-branch` | `-c` | `<分支>` | 目标分支（默认 `main`） |
+| `--dirs` | `-d` | `<a,b>` | 同步路径（目录或单个文件），逗号分隔 |
+| `--message` | `-m` | `<文本>` | 提交消息 |
+| `--push` | `-p` | flag | 提交后自动推送 |
+| `--force` | `-f` | flag | 强制应用全部计划变更（覆盖增量判定） |
+| `--incremental` | | flag | 只应用上次同步后变更的文件（`forceOverwrite: false`） |
+| `--preview-only` | `-P` | flag | 只打印计划，不修改任何内容 |
+| `--dry-run` | `-n` | flag | 同 `--preview-only`，用于脚本 |
+| `--config` | `-C` | `<路径>` | 指定配置文件；读取失败直接报错 |
+| `--config-format` | `-F` | `<格式>` | `json`（默认）/ `json5` / `yaml` / `toml`，用于 `-g` 生成 |
+| `--generate-config` | `-g` | flag | 生成默认配置文件后退出 |
+| `--non-interactive` | `-y` | flag | 不提问（配置不完整时仍会补全）；`prompt-user` 冲突降级为保留本地 |
+| `--ignore` | | `<a,b>` | 追加忽略规则（gitignore 语法） |
+| `--include-types` | | `<a,b>` | 仅同步这些扩展名，如 `.ts,.vue` |
+| `--conflict-strategy` | | `<s>` | `use-source` / `keep-target` / `auto-merge` / `prompt-user` / `skip` |
+| `--retry-max` | | `<n>` | 网络类失败最大重试次数 |
+| `--retry-delay` | | `<ms>` | 初始重试延迟 |
+| `--retry-backoff` | | `<factor>` | 退避因子 |
+| `--concurrency` | | `<n>` | 批量应用失败后逐路径重试的并发数 |
+| `--gray-release` | `-gr` | flag | 启用灰度发布 |
+| `--strategy` | | `<s>` | 灰度策略：`percentage`（默认）/ `directory` / `file` |
+| `--percentage` | | `<n>` | 灰度百分比，区间 `(0, 100]`，CLI 默认 20 |
+| `--canary-dirs` | | `<a,b>` | `directory` 策略的金丝雀目录 |
+| `--file-patterns` | | `<a,b>` | `file` 策略的文件模式 |
+| `--validation-script` | | `<命令>` | 灰度校验命令，非 0 退出即校验失败 |
+| `--full-release` | `-fr` | flag | 发布灰度阶段剩下的文件 |
+| `--rollback` | `-ro` | flag | 回滚 `.sync-gray.json` 记录的那次发布 |
+| `--auth-type` | | `<t>` | `ssh` / `pat` / `user_pass` |
+| `--auth-username` / `--auth-token` / `--auth-password` / `--auth-key` | | `<值>` | 对应认证凭据 |
+| `--webhook-enable` | `-we` | flag | 以 webhook 守护模式常驻运行 |
+| `--webhook-port` | | `<n>` | 监听端口（默认 3000） |
+| `--webhook-path` | | `<路径>` | 回调路径（默认 `/webhook`） |
+| `--webhook-secret` | | `<密钥>` | 签名校验密钥，空密钥一律拒绝请求 |
+| `--webhook-events` | | `<a,b>` | 允许的事件（默认 `push`） |
+| `--webhook-branch` | | `<分支>` | 触发同步的分支（默认 `main`） |
+| `--verbose` | `-V` | flag | verbose 级日志 + 完整变更清单（不含 debug） |
+| `--silent` | `-s` | flag | 只输出错误 |
+| `--version` | `-v` | flag | 显示版本 |
+| `--help` | `-h` | flag | 显示帮助 |
+
+未识别的参数会被直接拒绝（退出码 2）并提示使用 `--help`，不会被静默忽略。
+
+---
+
+## 运行期间会碰什么
+
+| 对象 | 位置 | 说明 |
+|---|---|---|
+| `.sync-state.json` | 仓库根 | 增量同步的基线；换上游仓库/分支自动作废重建，删掉也安全 |
+| `.sync-gray.json` | 仓库根 | 灰度发布进度；**灰度进行中不要删**，全量发布成功后自动删除 |
+| `.sync-gray-audit.jsonl` | 仓库根 | 灰度阶段审计，纯记录，可用 `grayReleaseConfig.auditLogPath` 改路径 |
+| remote `sync-upstream` | `.git/config` | 工具专属的上游 remote，不影响 `origin`，可随时 `git remote remove` |
+| 提交 | 目标分支 | 只包含本次应用的那些路径，不会把无关的脏文件卷进来 |
+
+内置忽略规则保证 `.sync-state.json`（连同旧版遗留的 `.sync-cache/`、`.sync-temp/`、`.sync-hashes.json`）不会进入同步范围；**两个灰度文件不在其中**，把仓库根当同步目录时请手工排除。使用 `pat` / `user_pass` 认证时，remote URL 会带上凭据——别把 `.git/config` 贴进日志或 issue（日志与报错里的 URL 已自动脱敏）。逐项细节见[运行产物与清理](docs/reference/configuration.md#运行产物与清理)。
 
 ---
 
 ## 常见问题速查
 
-| 错误提示 | 解决步骤 |
+| 现象 | 原因与处理 |
 |---|---|
-| `Error: Not a git repository` | `git init && git remote add origin <url>` |
-| `Failed to fetch upstream` | 检查网络、URL、Token 权限 |
-| `Permission denied` | 确认本地目录可写或私钥权限 600 |
+| `Not a git repository` | 当前目录不是 git 仓库：`git init` 后重试 |
+| `配置文件不存在: ...` | `-C` 指定的路径找不到；工具不会回落到默认值，请修正路径 |
+| `配置文件 x.json 解析失败` | 错误里列出了每种格式的失败原因，按提示改语法 |
+| `配置校验失败: - ...` | 一次列全部问题；按项修正 `upstreamRepo` / `syncDirs` / 枚举值等 |
+| `目标分支 x 既不在本地也不在 origin` | 预览模式不会替你建分支，先 `git branch -r` 确认分支名 |
+| `推送到 origin/xxx 失败` | 检查凭据与分支保护；提交已在本地，可单独 `git push` |
+| 计划为空但预期有变更 | 上一轮已同步过；用 `--force` 忽略 `.sync-state.json` 重新全量比对 |
+
+日志与退出码细节见 [FAQ](docs/faq.md)，完整字段说明见 [配置参考](docs/reference/configuration.md)。
 
 ---
 
-## 路线图
+## 文档地图
 
-项目的详细发展计划请查看完整的 [ROADMAP.md](ROADMAP.md) 文件。
+文档站是**纯使用指南**：安装、操作、配置、排错；内部实现与架构不在这套文档里。本地用 `pnpm docs:dev` 预览：
 
-### 近期规划
-- **2025 Q3**
-  - Web Dashboard Beta（实时冲突热力图）
-  - Policy-as-Code GA（Rego 规则引擎）
+| 分区 | 页面 | 讲什么 |
+|---|---|---|
+| 选型 | [与 fork 同步的对比](docs/guide/vs-fork-sync.md) | 什么时候用自带 "Fetch upstream" 就够，什么时候需要本工具 |
+| 上手 | [快速开始](docs/guide/quick-start.md) · [安装指南](docs/guide/installation.md) · [配置文件](docs/guide/configuration.md) | 前置条件、安装、生成并填好第一份配置 |
+| 使用 | [使用总览](docs/guide/usage.md) | 一次运行会做什么、各页入口 |
+| 使用 | [日常同步](docs/guide/sync-basics.md) | 预览、交互、应用与提交边界、分支策略 |
+| 使用 | [冲突处理](docs/guide/conflicts.md) | 4 类冲突、5 种策略、自动合并的边界 |
+| 使用 | [灰度发布与回滚](docs/guide/gray-release.md) | 选择策略、阶段与状态、校验、回滚 |
+| 使用 | [Webhook 守护模式](docs/guide/webhook.md) | 请求处理顺序与状态码、签名、事件过滤 |
+| 使用 | [CI 与自动化](docs/guide/automation.md) | 非交互、退出码、日志、并发与重试、失败重来 |
+| 参考 | [命令行参考](docs/reference/cli.md) · [配置参考](docs/reference/configuration.md) · [API 参考](docs/reference/api.md) | 参数、字段、编程入口逐项说明 |
+| 项目 | [功能记录](docs/features.md) · [常见问题](docs/faq.md) · [更新日志](docs/changelog.md) | 功能与限制、排错、变更历史 |
+| English | [docs/en/](docs/en/) | 与中文逐页对应的完整英文版 |
 
-- **2025 Q4**
-  - AI 冲突助手 GA（自动生成合并摘要）
-  - SaaS 多租户上线
-
-### 已完成功能
-- 增量哈希 diff
-- 并行文件处理
-- 大文件 LFS / Git-Annex 支持
-- 本地缓存代理
-- 声明式冲突解决
-- 多认证方式支持
-- 预览模式
-- 重试机制
-
----
-
-## 贡献指南
-
-我们欢迎社区贡献！请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 了解如何参与项目开发。
+- 英文说明：[README.en.md](README.en.md)
+- 变更历史：[CHANGELOG.md](CHANGELOG.md)
+- 要求：Node.js ≥ 18.2、Git ≥ 2.25
+- 开发：`pnpm install` → `pnpm test` → `pnpm build`；欢迎提 issue 与 PR，请先跑通 `pnpm lint && pnpm test`，并在 PR 里说明对应的行为变化
 
 ---
 

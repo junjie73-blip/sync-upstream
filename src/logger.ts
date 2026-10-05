@@ -1,5 +1,6 @@
 import type { ConsolaInstance } from 'consola'
 import path from 'node:path'
+import process from 'node:process'
 import { consola } from 'consola'
 import dayjs from 'dayjs'
 import fs from 'fs-extra'
@@ -43,31 +44,34 @@ const DEFAULT_CONFIG: LoggerConfig = {
 export class Logger {
   private consola: ConsolaInstance
   private config: LoggerConfig
+  // 从最啰嗦到最安静；配置等级及其以上的日志才会输出。
   private logLevels = [
     LogLevel.TRACE,
     LogLevel.DEBUG,
     LogLevel.VERBOSE,
     LogLevel.INFO,
     LogLevel.SUCCESS,
+    LogLevel.PERF,
     LogLevel.WARN,
     LogLevel.ERROR,
-    LogLevel.PERF,
   ]
 
   constructor(config: Partial<LoggerConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config }
-    this.consola = consola.create({
-      level: this.logLevels.indexOf(this.config.level),
-      formatOptions: {
-        colors: true,
-        date: this.config.showTimestamp,
-      },
-    })
+    this.consola = this.createConsola()
 
     // 如果配置了日志文件，确保目录存在
     if (this.config.logToFile) {
       fs.ensureDirSync(path.dirname(this.config.logFilePath))
     }
+  }
+
+  private rank(): number {
+    return this.logLevels.indexOf(this.config.level)
+  }
+
+  private enabled(level: LogLevel): boolean {
+    return this.logLevels.indexOf(level) >= this.rank()
   }
 
   // 获取当前时间戳
@@ -109,7 +113,7 @@ export class Logger {
 
   // 调试日志
   debug(message: string, context?: Record<string, any>): void {
-    if (this.logLevels.indexOf(LogLevel.DEBUG) >= this.logLevels.indexOf(this.config.level)) {
+    if (this.enabled(LogLevel.DEBUG)) {
       const contextStr = context ? ` ${JSON.stringify(context)}` : ''
       this.consola.debug(blue(`[DEBUG] ${message}${contextStr}`))
       this.logToFile(LogLevel.DEBUG, message, context)
@@ -118,7 +122,7 @@ export class Logger {
 
   // 详细日志
   verbose(message: string): void {
-    if (this.logLevels.indexOf(LogLevel.VERBOSE) >= this.logLevels.indexOf(this.config.level)) {
+    if (this.enabled(LogLevel.VERBOSE)) {
       this.consola.log(gray(`[VERBOSE] ${message}`))
       this.logToFile(LogLevel.VERBOSE, message)
     }
@@ -126,7 +130,7 @@ export class Logger {
 
   // 追踪日志
   trace(message: string, context?: Record<string, any>): void {
-    if (this.config.traceEnabled && this.logLevels.indexOf(LogLevel.TRACE) >= this.logLevels.indexOf(this.config.level)) {
+    if (this.config.traceEnabled && this.enabled(LogLevel.TRACE)) {
       const contextStr = context ? ` ${JSON.stringify(context)}` : ''
       this.consola.log(`[TRACE] ${message}${contextStr}`)
       this.logToFile(LogLevel.TRACE, message, context)
@@ -135,7 +139,7 @@ export class Logger {
 
   // 性能日志
   perf(operation: string, durationMs: number, context?: Record<string, any>): void {
-    if (this.config.perfMetricsEnabled && this.logLevels.indexOf(LogLevel.PERF) >= this.logLevels.indexOf(this.config.level)) {
+    if (this.config.perfMetricsEnabled && this.enabled(LogLevel.PERF)) {
       const formattedDuration = durationMs.toFixed(2)
       const contextStr = context ? ` ${JSON.stringify(context)}` : ''
       this.consola.log(cyan(`[PERF] ${operation} took ${formattedDuration}ms${contextStr}`))
@@ -143,15 +147,14 @@ export class Logger {
     }
   }
 
-  // 设置日志级别
+  // 设置日志级别：过滤只由 logLevels 顺序决定，consola 保持全放行
   setLevel(level: LogLevel): void {
     this.config.level = level
-    this.consola.level = this.logLevels.indexOf(level)
   }
 
   // 信息日志
   info(message: string, context?: Record<string, any>): void {
-    if (this.logLevels.indexOf(LogLevel.INFO) >= this.logLevels.indexOf(this.config.level)) {
+    if (this.enabled(LogLevel.INFO)) {
       const contextStr = context ? ` ${JSON.stringify(context)}` : ''
       this.consola.info(cyan(`[INFO] ${message}${contextStr}`))
       this.logToFile(LogLevel.INFO, message, context)
@@ -160,7 +163,7 @@ export class Logger {
 
   // 成功日志
   success(message: string, context?: Record<string, any>): void {
-    if (this.logLevels.indexOf(LogLevel.SUCCESS) >= this.logLevels.indexOf(this.config.level)) {
+    if (this.enabled(LogLevel.SUCCESS)) {
       const contextStr = context ? ` ${JSON.stringify(context)}` : ''
       this.consola.success(green(`[SUCCESS] ${message}${contextStr}`))
       this.logToFile(LogLevel.SUCCESS, message, context)
@@ -169,7 +172,7 @@ export class Logger {
 
   // 警告日志
   warn(message: string, context?: Record<string, any>): void {
-    if (this.logLevels.indexOf(LogLevel.WARN) >= this.logLevels.indexOf(this.config.level)) {
+    if (this.enabled(LogLevel.WARN)) {
       const contextStr = context ? ` ${JSON.stringify(context)}` : ''
       this.consola.warn(yellow(`[WARN] ${message}${contextStr}`))
       this.logToFile(LogLevel.WARN, message, context)
@@ -178,7 +181,7 @@ export class Logger {
 
   // 错误日志
   error(message: string, error?: Error, context?: Record<string, any>): void {
-    if (this.logLevels.indexOf(LogLevel.ERROR) >= this.logLevels.indexOf(this.config.level)) {
+    if (this.enabled(LogLevel.ERROR)) {
       const errorMessage = error ? `${message}: ${error.message}` : message
       const contextObj = { ...(context || {}), ...(error?.stack ? { stack: error.stack } : {}) }
       const contextStr = contextObj ? ` ${JSON.stringify(contextObj)}` : ''
@@ -189,6 +192,8 @@ export class Logger {
 
   // 步骤日志（用于显示同步过程中的主要步骤）
   step(stepNumber: number, message: string): void {
+    if (!this.enabled(LogLevel.INFO))
+      return
     const formattedMessage = bold(magenta(`
 ${stepNumber}. ${message}`))
     this.consola.log(formattedMessage)
@@ -198,18 +203,23 @@ ${stepNumber}. ${message}`))
   // 更新配置
   updateConfig(config: Partial<LoggerConfig>): void {
     this.config = { ...this.config, ...config }
-    this.consola = consola.create({
-      level: this.logLevels.indexOf(this.config.level),
-      formatOptions: {
-        colors: true,
-        date: this.config.showTimestamp,
-      },
-    })
+    this.consola = this.createConsola()
 
     // 如果开启了日志文件，确保目录存在
     if (this.config.logToFile) {
       fs.ensureDirSync(path.dirname(this.config.logFilePath))
     }
+  }
+
+  private createConsola(): ConsolaInstance {
+    return consola.create({
+      // 过滤全部由 logLevels 决定，这里只保证 consola 自身不会二次拦截。
+      level: Number.MAX_SAFE_INTEGER,
+      formatOptions: {
+        colors: true,
+        date: this.config.showTimestamp,
+      },
+    })
   }
 }
 

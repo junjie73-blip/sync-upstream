@@ -1,345 +1,319 @@
-import type { SyncOptions } from './types'
-import toml from '@iarna/toml'
-import fs from 'fs-extra'
-import yaml from 'js-yaml'
-import json5 from 'json5'
+import type { RawSyncConfig, SyncConfig } from './domain'
+import process from 'node:process'
 import minimist from 'minimist'
-import { bold, cyan, green, yellow } from 'picocolors'
-import simpleGit from 'simple-git'
+import { bold, cyan, yellow } from 'picocolors'
 import pkg from '../package.json'
-
-// 确保缓存系统被初始化
-// 显式引用getFromCache以确保它被包含在编译后的代码中
-import { getFromCache } from './cache'
-
-import { DEFAULT_CONFIG, generateDefaultConfig, loadConfig, validateConfig } from './config'
+import { buildConfig, generateDefaultConfig, loadConfig } from './config'
+import { ConflictResolutionStrategy, GrayReleaseStrategy } from './domain'
+import { exitCodeFor, isSyncError, toError } from './errors'
 import { logger, LogLevel } from './logger'
-import { promptForOptions } from './prompts'
-import { initializeCache, UpstreamSyncer } from './sync'
+import { failedChanges } from './pipeline/apply'
+import { collectMissingOptions, conflictPrompt, displaySummary } from './prompts'
+import { runSync } from './sync'
 
-import { GrayReleaseStrategy } from './types'
+const STRING_FLAGS = [
+  'repo',
+  'branch',
+  'company-branch',
+  'dirs',
+  'message',
+  'config',
+  'config-format',
+  'retry-max',
+  'retry-delay',
+  'retry-backoff',
+  'concurrency',
+  'strategy',
+  'percentage',
+  'canary-dirs',
+  'file-patterns',
+  'validation-script',
+  'ignore',
+  'include-types',
+  'conflict-strategy',
+  'auth-type',
+  'auth-username',
+  'auth-token',
+  'auth-password',
+  'auth-key',
+  'webhook-port',
+  'webhook-path',
+  'webhook-secret',
+  'webhook-events',
+  'webhook-branch',
+]
 
-(async () => {
-  try {
-    await initializeCache()
-    logger.debug('Cache system initialized successfully')
-  }
-  catch (error) {
-    logger.error('Failed to initialize cache system:', error as Error)
-  }
+const BOOLEAN_FLAGS = [
+  'push',
+  'version',
+  'help',
+  'force',
+  'incremental',
+  'verbose',
+  'silent',
+  'dry-run',
+  'preview-only',
+  'non-interactive',
+  'generate-config',
+  'gray-release',
+  'full-release',
+  'rollback',
+  'webhook-enable',
+]
 
-  // 确保getFromCache被实际使用
-  try {
-    // 这个调用不会实际执行，因为我们使用了一个不太可能存在的缓存键
-    // 但它会确保函数被编译器包含
-    const dummyResult = await getFromCache('__dummy_cache_key_for_compilation__', { decompress: false })
-    if (dummyResult) {
-      logger.debug('Dummy cache lookup succeeded (unexpected)')
-    }
-  }
-  catch (error) {
-    // 忽略这个错误
-  }
-})()
-
-// 检查当前目录是否是Git仓库
-async function isGitRepository(): Promise<boolean> {
-  try {
-    const git = simpleGit()
-    await git.status()
-    return true
-  }
-  catch (error) {
-    return false
-  }
+const ALIASES: Record<string, string> = {
+  r: 'repo',
+  b: 'branch',
+  c: 'company-branch',
+  d: 'dirs',
+  m: 'message',
+  p: 'push',
+  f: 'force',
+  h: 'help',
+  v: 'version',
+  V: 'verbose',
+  s: 'silent',
+  n: 'dry-run',
+  P: 'preview-only',
+  C: 'config',
+  F: 'config-format',
+  y: 'non-interactive',
+  g: 'generate-config',
+  gr: 'gray-release',
+  fr: 'full-release',
+  ro: 'rollback',
+  we: 'webhook-enable',
 }
 
-// 解析命令行参数
-const args = minimist(process.argv.slice(2), {
-  // 使用string类型并在后续代码中转换为数字
-  string: ['repo', 'branch', 'company-branch', 'dirs', 'message', 'config', 'config-format', 'retry-max', 'retry-delay', 'retry-backoff', 'concurrency', 'webhook-port', 'webhook-path', 'webhook-secret', 'webhook-events', 'webhook-branch'],
-  boolean: ['push', 'v', 'version', 'force', 'verbose', 'silent', 'dry-run', 'preview-only', 'non-interactive', 'gray-release', 'full-release', 'rollback', 'webhook-enable', 'generate-config'],
-  alias: {
-    r: 'repo',
-    b: 'branch',
-    c: 'company-branch',
-    d: 'dirs',
-    m: 'message',
-    p: 'push',
-    f: 'force',
-    h: 'help',
-    v: 'version',
-    V: 'verbose',
-    s: 'silent',
-    n: 'dry-run',
-    P: 'preview-only',
-    C: 'config',
-    F: 'config-format',
-    rm: 'retry-max',
-    rd: 'retry-delay',
-    rb: 'retry-backoff',
-    cl: 'concurrency',
-    y: 'non-interactive',
-    g: 'generate-config',
-    gr: 'gray-release',
-    fr: 'full-release',
-    ro: 'rollback',
-    we: 'webhook-enable',
-    wp: 'webhook-port',
-    wpa: 'webhook-path',
-    ws: 'webhook-secret',
-    wev: 'webhook-events',
-    wb: 'webhook-branch',
-  },
-  default: {
-    'branch': 'main',
-    'company-branch': undefined,
-    'dirs': '',
-    'message': 'Sync upstream changes to specified directories',
-    'push': false,
-    'force': true,
-    'verbose': false,
-    'silent': false,
-    'dry-run': false,
-    'preview-only': false,
-    'config': '',
-    'config-format': 'json',
-    'generate-config': false,
-    'retry-max': undefined,
-    'retry-delay': undefined,
-    'retry-backoff': undefined,
-    'concurrency': undefined,
-    'webhook-enable': false,
-    'webhook-port': '3000',
-    'webhook-path': '/webhook',
-    'webhook-secret': '',
-    'webhook-events': 'push',
-    'webhook-branch': 'main',
-  },
-})
-
-// 显示版本信息
-if (args.version) {
-  logger.success(bold(cyan(`sync-upstream v${pkg.version}`)))
-  process.exit(0)
+export function parseArgs(argv: string[]): minimist.ParsedArgs {
+  return minimist(argv, {
+    string: STRING_FLAGS,
+    boolean: BOOLEAN_FLAGS,
+    alias: ALIASES,
+    default: { 'config-format': 'json', 'webhook-port': '3000', 'webhook-path': '/webhook', 'webhook-events': 'push', 'webhook-branch': 'main' },
+  })
 }
 
-// 显示帮助信息
-if (args.help) {
-  logger.info(bold(cyan('仓库目录 - 交互版\n')))
-  logger.info('用法: sync-upstream [选项]\n')
-  logger.info('选项:')
-  logger.info(green('  -r, --repo <url>        上游仓库 URL'))
-  logger.info(green('  -d, --dirs <目录>       要同步的目录，多个目录用逗号分隔'))
-  logger.info(green('  -b, --branch <分支>      上游分支 (默认: main)'))
-  logger.info(green('  -c, --company-branch <分支>  目标仓库分支 (默认: main)'))
-  logger.info(green('  -m, --message <消息>    提交消息'))
-  logger.info(green('  -p, --push              自动推送变更'))
-  logger.info(green('  -f, --force             强制覆盖本地文件，不使用增量复制 (默认: true)'))
-  logger.info(green('  -V, --verbose           显示详细日志信息'))
-  logger.info(green('  -s, --silent            静默模式，不输出日志'))
-  logger.info(green('  -n, --dry-run           试运行模式，不实际执行同步操作'))
-  logger.info(green('  -P, --preview-only      预览模式，只显示变更，不实际修改文件'))
-  logger.info(green('  -C, --config <路径>     指定配置文件路径'))
-  logger.info(green('  -F, --config-format <格式> 配置文件格式 (json, yaml, toml)'))
-  logger.info(green('  -g, --generate-config   生成默认配置文件'))
-  logger.info(green('  --rm, --retry-max <次数>   网络请求最大重试次数 (默认: 3)'))
-  logger.info(green('  --rd, --retry-delay <毫秒>  初始重试延迟时间 (默认: 2000)'))
-  logger.info(green('  --rb, --retry-backoff <因子> 重试退避因子 (默认: 1.5)'))
-  logger.info(green('  --cl, --concurrency <数量> 并行处理的最大文件数量 (默认: 5)'))
-  logger.info(green('  -v, --version           显示版本信息'))
-  logger.info(green('  -h, --help              显示帮助信息'))
-  logger.info(green('  -y, --non-interactive   非交互式模式，跳过所有确认提示'))
-  logger.info(green('  -gr, --gray-release     启用灰度发布模式'))
-  logger.info(green('  -fr, --full-release     执行全量发布'))
-  logger.info(green('  -ro, --rollback         执行回滚操作'))
-  logger.info(green('  -we, --webhook-enable   启用Webhook功能'))
-  logger.info(green('  -wp, --webhook-port     Webhook监听端口'))
-  logger.info(green('  -wpa, --webhook-path    Webhook路径'))
-  logger.info(green('  -ws, --webhook-secret   Webhook密钥'))
-  logger.info(green('  -wev, --webhook-events  Webhook允许的事件类型'))
-  logger.info(green('  -wb, --webhook-branch   Webhook触发分支\n'))
-  logger.info('示例:')
-  logger.info(bold(cyan('  sync-upstream -r https://github.com/open-source/project.git -d src/core,docs')))
-  logger.info(`\n${yellow('如果没有提供参数，将启动交互式向导')}`)
-  process.exit(0)
+const KNOWN = new Set<string>([...STRING_FLAGS, ...BOOLEAN_FLAGS, ...Object.keys(ALIASES), '_'])
+
+/** Reject unknown switches before they can be mistaken for "the tool ignored my flag". */
+export function unknownFlags(argv: Record<string, unknown>): string[] {
+  return Object.keys(argv).filter(key => !KNOWN.has(key))
 }
 
-// 生成默认配置文件
-if (args['generate-config']) {
-  (async () => {
-    const configPath = args.config || './sync-upstream.config.json'
-    const configFormat = args['config-format'] as 'json' | 'yaml' | 'toml'
-    logger.info(`正在生成默认配置文件到 ${configPath} (格式: ${configFormat})`)
-    await generateDefaultConfig(configPath, configFormat)
-    process.exit(0)
-  })()
-}
-
-// 检查是否在Git仓库中
-async function run() {
-  const isGitRepo = await isGitRepository()
-  if (!isGitRepo) {
-    logger.error('当前目录不是Git仓库。请在Git初始化后的目录中运行此工具。')
-    process.exit(1)
+/** Map parsed CLI flags onto canonical config keys; absent flags produce no key at all. */
+export function cliLayer(argv: minimist.ParsedArgs): RawSyncConfig {
+  const layer: Record<string, unknown> = {}
+  const set = (key: string, value: unknown): void => {
+    if (value !== undefined && value !== '')
+      layer[key] = value
+  }
+  const list = (value: unknown): string[] => {
+    if (Array.isArray(value))
+      return value.flatMap(item => String(item).split(','))
+    return String(value).split(',').map(item => item.trim()).filter(Boolean)
   }
 
-  // 根据命令行参数设置日志级别
-  if (args.silent) {
-    logger.setLevel(LogLevel.ERROR)
+  set('upstreamRepo', argv.repo)
+  set('upstreamBranch', argv.branch)
+  set('companyBranch', argv['company-branch'])
+  if (argv.dirs)
+    layer.syncDirs = list(argv.dirs)
+  set('commitMessage', argv.message)
+  if (argv.push)
+    layer.autoPush = true
+  if (argv.force)
+    layer.forceOverwrite = true
+  if (argv.incremental)
+    layer.forceOverwrite = false
+  if (argv.verbose)
+    layer.verbose = true
+  if (argv.silent)
+    layer.silent = true
+  if (argv['dry-run'])
+    layer.dryRun = true
+  if (argv['preview-only'])
+    layer.previewOnly = true
+  if (argv['non-interactive'])
+    layer.nonInteractive = true
+  if (argv.concurrency)
+    layer.concurrencyLimit = Number(argv.concurrency)
+  if (argv.ignore)
+    layer.ignorePatterns = list(argv.ignore)
+  if (argv['include-types'])
+    layer.includeFileTypes = list(argv['include-types'])
+  if (argv['conflict-strategy'])
+    layer.conflictResolutionConfig = { defaultStrategy: argv['conflict-strategy'] as ConflictResolutionStrategy }
+  if (argv['retry-max'] !== undefined) {
+    layer.retryConfig = { maxRetries: Number(argv['retry-max']) }
   }
-  else if (args.verbose) {
-    logger.setLevel(LogLevel.VERBOSE)
+  if (argv['retry-delay'] !== undefined) {
+    layer.retryConfig = { ...(layer.retryConfig as object), initialDelay: Number(argv['retry-delay']) }
   }
-  else {
-    logger.setLevel(LogLevel.INFO)
+  if (argv['retry-backoff'] !== undefined) {
+    layer.retryConfig = { ...(layer.retryConfig as object), backoffFactor: Number(argv['retry-backoff']) }
   }
-
-  // 准备初始配置
-  const initialOptions: Partial<SyncOptions> = {
-    upstreamRepo: args.repo,
-    upstreamBranch: args.branch,
-    companyBranch: args['company-branch'],
-    syncDirs: args.dirs ? args.dirs.split(',').map((dir: string) => dir.trim()) : [],
-    commitMessage: args.message,
-    autoPush: args.push,
-    forceOverwrite: args.force,
-    verbose: args.verbose,
-    silent: args.silent,
-    dryRun: args['dry-run'],
-    previewOnly: args['preview-only'],
-    nonInteractive: args['non-interactive'],
-    concurrencyLimit: args.concurrency ? Number.parseInt(args.concurrency, 10) : undefined,
-    retryConfig: {
-      maxRetries: args['retry-max'],
-      initialDelay: args['retry-delay'],
-      backoffFactor: args['retry-backoff'],
-    },
-    // 灰度发布配置
-    grayReleaseConfig: args['gray-release'] ? {
+  if (argv['gray-release']) {
+    layer.grayReleaseConfig = {
       enable: true,
-      strategy: GrayReleaseStrategy.PERCENTAGE, // 默认策略
-      percentage: 100, // 默认100%
-    } : undefined,
-    // Webhook配置
-    webhookConfig: args['webhook-enable']
-      ? {
-          enable: true,
-          port: Number.parseInt(args['webhook-port'], 10),
-          path: args['webhook-path'],
-          secret: args['webhook-secret'],
-          supportedPlatforms: ['github'], // 默认支持GitHub
-          allowedEvents: args['webhook-events'].split(',').map((event: string) => event.trim()),
-          triggerBranch: args['webhook-branch'],
-          retryConfig: { maxRetries: 3, initialDelay: 1000, backoffFactor: 2 },
-          securityConfig: { ipWhitelist: [], rateLimit: { maxRequestsPerSecond: 10, statusCode: 429, message: 'Too many requests' } },
-          eventFilterConfig: { rules: [] },
-        }
-      : undefined,
-    // 全量发布和回滚标记
-    fullRelease: args['full-release'],
-    rollback: args.rollback,
-  }
-
-  // 加载配置文件
-  let configOptions: Partial<SyncOptions> = {}
-
-  // 如果指定了配置文件路径，则使用该文件
-  const configPath = args.config ? args.config : null
-  const configFormat = args['config-format'] as 'json' | 'yaml' | 'toml'
-
-  // 加载配置文件
-  if (configPath) {
-    try {
-      logger.trace(`尝试加载指定的配置文件: ${configPath}`)
-      const fileContent = await fs.readFile(configPath, 'utf8')
-      let config: Partial<SyncOptions> = {}
-
-      // 根据文件扩展名选择解析方法
-      if (configPath.endsWith('.json5')) {
-        config = json5.parse(fileContent)
-      }
-      else if (configPath.endsWith('.json')) {
-        config = JSON.parse(fileContent)
-      }
-      else if (configPath.endsWith('.yaml') || configPath.endsWith('.yml')) {
-        config = yaml.load(fileContent) as Partial<SyncOptions>
-      }
-      else if (configPath.endsWith('.toml')) {
-        config = toml.parse(fileContent) as Partial<SyncOptions>
-      }
-      else {
-        // 尝试作为JSON解析
-        config = JSON.parse(fileContent)
-      }
-
-      // 验证配置
-      validateConfig(config)
-      logger.debug(`指定的配置文件 ${configPath} 加载成功`)
-      configOptions = { ...DEFAULT_CONFIG, ...config }
-    }
-    catch (error) {
-      logger.error(`读取指定的配置文件 ${configPath} 失败`, error as Error)
-      process.exit(1)
+      strategy: (argv.strategy as GrayReleaseStrategy) ?? GrayReleaseStrategy.PERCENTAGE,
+      percentage: argv.percentage === undefined ? 20 : Number(argv.percentage),
+      canaryDirs: argv['canary-dirs'] ? list(argv['canary-dirs']) : undefined,
+      filePatterns: argv['file-patterns'] ? list(argv['file-patterns']) : undefined,
+      validationScript: argv['validation-script'],
     }
   }
-  else {
-    // 未指定配置文件，查找默认配置文件
-    configOptions = await loadConfig()
+  if (argv['full-release'])
+    layer.fullRelease = true
+  if (argv.rollback)
+    layer.rollback = true
+  if (argv['webhook-enable']) {
+    layer.webhookConfig = {
+      enable: true,
+      port: Number(argv['webhook-port']),
+      path: argv['webhook-path'],
+      secret: argv['webhook-secret'] ?? '',
+      allowedEvents: list(argv['webhook-events']),
+      triggerBranch: argv['webhook-branch'],
+      supportedPlatforms: ['github'],
+    }
   }
-
-  // 合并配置文件和命令行参数，配置文件优先级更高
-  // 先处理对象类型的配置项
-  const mergedOptions: Partial<SyncOptions> = {
-    ...initialOptions,
-    ...configOptions,
+  if (argv['auth-type']) {
+    layer.authConfig = {
+      type: argv['auth-type'],
+      username: argv['auth-username'],
+      token: argv['auth-token'],
+      password: argv['auth-password'],
+      privateKeyPath: argv['auth-key'],
+    }
   }
-
-  // 特别处理 syncDirs 数组
-  // 如果配置文件中指定了 syncDirs，则优先使用配置文件的值
-  if (configOptions.syncDirs && configOptions.syncDirs.length > 0) {
-    mergedOptions.syncDirs = configOptions.syncDirs
-  }
-  else if (initialOptions.syncDirs && initialOptions.syncDirs.length > 0) {
-  // 如果配置文件中没有指定，但命令行参数中有值，则使用命令行的值
-    mergedOptions.syncDirs = initialOptions.syncDirs
-  }
-  else {
-  // 如果都没有指定，则设为空数组
-    mergedOptions.syncDirs = []
-  }
-
-  // 确定是否启用非交互式模式
-  // 只有当明确指定-y或--non-interactive时才是非交互式模式
-  const nonInteractive = args['non-interactive'] || false
-
-  // 即使在非交互式模式下，如果缺少必要参数（upstreamRepo或syncDirs），也强制进入交互式模式
-  const forceInteractive = !mergedOptions.upstreamRepo || !mergedOptions.syncDirs || mergedOptions.syncDirs.length === 0
-  const actualNonInteractive = nonInteractive && !forceInteractive
-
-  // 检查是否有未知参数
-  const unknownParams = Object.keys(args).filter(key => !['_', 'repo', 'r', 'branch', 'b', 'company-branch', 'c', 'dirs', 'd', 'message', 'm', 'push', 'p', 'force', 'f', 'verbose', 'V', 'silent', 's', 'dry-run', 'n', 'preview-only', 'P', 'config', 'C', 'config-format', 'F', 'retry-max', 'rm', 'retry-delay', 'rd', 'retry-backoff', 'rb', 'concurrency', 'cl', 'non-interactive', 'y', 'gray-release', 'gr', 'full-release', 'fr', 'rollback', 'ro', 'help', 'h', 'version', 'v', 'webhook-enable', 'webhook-port', 'webhook-path', 'webhook-secret', 'webhook-events', 'webhook-branch', 'we', 'wp', 'wpa', 'ws', 'wev', 'wb', 'generate-config', 'g'].includes(key))
-  if (unknownParams.length > 0) {
-    logger.error('检测到未知的配置项:', undefined, { unknownParams })
-    logger.warn('请使用 --help 查看所有可用的配置项')
-    process.exit(1)
-  }
-
-  // 启动交互式提示
-  const options = await promptForOptions(mergedOptions, actualNonInteractive) as SyncOptions
-
-  try {
-    const startTime = performance.now()
-    const syncer = new UpstreamSyncer(options)
-    await syncer.run()
-    const endTime = performance.now()
-    logger.perf('同步操作总耗时', endTime - startTime)
-  }
-  catch (error) {
-    logger.error('发生错误:', error as Error)
-    process.exit(1)
-  }
+  return layer as RawSyncConfig
 }
 
-// 运行主函数
-run()
+const HELP = `${bold(cyan('sync-upstream — 目录级上游同步'))}
+
+用法: sync-upstream [选项]
+
+  -r, --repo <url>          上游仓库 URL
+  -b, --branch <分支>        上游分支 (默认取配置或 main)
+  -c, --company-branch <分支> 目标分支 (默认 main)
+  -d, --dirs <a,b>          要同步的目录，逗号分隔
+  -m, --message <文本>       提交消息
+  -p, --push                同步后自动推送
+  -f, --force / --incremental  强制覆盖 / 仅同步上次以来的变更
+  -P, --preview-only        只打印计划，不修改工作区
+  -n, --dry-run             同 --preview-only，用于脚本
+  -y, --non-interactive     不询问任何问题
+  -C, --config <路径>        指定配置文件（读取失败会直接报错）
+  -F, --config-format <格式>  生成配置时的格式: json|json5|yaml|toml
+  -g, --generate-config     生成默认配置文件后退出
+      --ignore <a,b>        追加忽略规则（gitignore 语法）
+      --include-types <a,b> 仅同步这些扩展名，如 .ts,.vue
+      --conflict-strategy <s> use-source|keep-target|auto-merge|prompt-user|skip
+      --retry-max/-delay/-backoff  网络重试参数
+      --concurrency <n>     失败逐文件重试的并发数
+  -gr, --gray-release       启用灰度发布
+      --strategy <s>        percentage|directory|file
+      --percentage <n>      灰度百分比 (0,100]
+      --canary-dirs <a,b>   金丝雀目录
+      --file-patterns <a,b> 金丝雀文件模式
+      --validation-script <cmd> 灰度校验命令
+  -fr, --full-release       发布灰度剩余文件
+  -ro, --rollback           回滚最近一次灰度发布
+  -we, --webhook-enable     以 webhook 守护模式常驻运行
+      --webhook-port/-path/-secret/-events/-branch
+  -V, --verbose / -s, --silent
+  -v, --version / -h, --help
+
+示例:
+  sync-upstream -r https://github.com/org/upstream.git -d src/utils,docs -b main
+  sync-upstream -C sync-upstream.json -P
+`
+
+/** CLI > config file > defaults, then interactive completion unless -y. */
+export async function resolveRuntimeConfig(argv: minimist.ParsedArgs): Promise<{ config: SyncConfig, source: string | null }> {
+  const loaded = await loadConfig({
+    configPath: argv.config ? String(argv.config) : undefined,
+    baseDir: process.cwd(),
+  })
+  for (const warning of loaded.warnings) logger.warn(warning)
+
+  const layer = cliLayer(argv)
+  if (argv['conflict-strategy']) {
+    layer.conflictResolutionConfig = { defaultStrategy: argv['conflict-strategy'] as ConflictResolutionStrategy }
+  }
+
+  const { config, warnings } = buildConfig([loaded.layer, layer])
+  for (const warning of warnings) logger.warn(warning)
+  return { config, source: loaded.source }
+}
+
+export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
+  const args = parseArgs(argv)
+
+  if (args.version) {
+    logger.success(bold(cyan(`sync-upstream v${pkg.version}`)))
+    return 0
+  }
+  if (args.help) {
+    console.log(HELP)
+    return 0
+  }
+  if (args['generate-config']) {
+    const target = args.config || `./sync-upstream.config.${args['config-format'] ?? 'json'}`
+    const written = await generateDefaultConfig(target, args['config-format'] as never)
+    logger.success(`默认配置已生成: ${written}`)
+    return 0
+  }
+
+  const unknown = unknownFlags(args)
+  if (unknown.length > 0) {
+    logger.error(`无法识别的命令行参数: ${unknown.join(', ')}`)
+    console.log(yellow('使用 --help 查看全部可用参数'))
+    return 2
+  }
+
+  const { config, source } = await resolveRuntimeConfig(args)
+  if (args.verbose)
+    logger.setLevel(LogLevel.VERBOSE)
+  else if (args.silent)
+    logger.setLevel(LogLevel.ERROR)
+
+  const incomplete = !config.upstreamRepo || config.syncDirs.length === 0
+  const interactive = !config.nonInteractive || incomplete
+  const finalConfig = interactive ? await collectMissingOptions(config) : config
+
+  displaySummary(finalConfig, source)
+  if (finalConfig.webhookConfig?.enable) {
+    const { serveWebhooks } = await import('./pipeline/webhook-mode')
+    return serveWebhooks(finalConfig)
+  }
+
+  const result = await runSync({
+    config: finalConfig,
+    cwd: process.cwd(),
+    prompt: finalConfig.conflictResolutionConfig.defaultStrategy === ConflictResolutionStrategy.PROMPT_USER
+      ? conflictPrompt
+      : undefined,
+  })
+  if (result.applied)
+    return failedChanges(result.applied).length > 0 ? 1 : 0
+  return 0
+}
+
+/** Fail loudly with the mapped exit code instead of a stack trace. */
+export function reportFatal(error: unknown): number {
+  if (isSyncError(error)) {
+    error.report()
+    return exitCodeFor(error)
+  }
+  const detail = toError(error)
+  logger.error(`未预期的错误: ${detail.message}`, detail)
+  return exitCodeFor(error)
+}
+
+if (/(?:^|[\\/])cli\.[cm]?[jt]sx?$/.test(process.argv[1] ?? '')) {
+  main().then(code => process.exit(code)).catch((error) => {
+    process.exit(reportFatal(error))
+  })
+}

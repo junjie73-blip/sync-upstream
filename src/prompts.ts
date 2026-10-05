@@ -1,256 +1,120 @@
-import type { SyncOptions } from './types'
+import type { ConflictCandidate, ConflictPrompt, SyncConfig } from './domain'
+import process from 'node:process'
 import { blue, bold, cyan, green, magenta, yellow } from 'picocolors'
 import prompts from 'prompts'
-// 确保prompts是函数
-if (typeof prompts !== 'function') {
-  console.error('Error: prompts is not a function')
-  process.exit(1)
+import { ConflictResolutionStrategy } from './domain'
+import { logger } from './logger'
+
+function cancelled(): never {
+  logger.warn(yellow('操作已取消'))
+  process.exit(0)
 }
 
-export async function promptForOptions(initialOptions: Partial<SyncOptions> = {}, nonInteractive: boolean = false) {
-  // 即使在非交互式模式下，也显示配置摘要
-  if (nonInteractive) {
-    console.log(bold(cyan('\n🔄 仓库目录同步工具 - 非交互式模式\n')))
-    // 构建提示列表，只包含未在initialOptions中提供的选项
-    const promptQuestions = []
+const SIGNAL = { onCancel: cancelled }
 
-    // 上游分支
-    if (initialOptions.upstreamBranch === undefined) {
-      promptQuestions.push({
-        type: 'text',
-        name: 'upstreamBranch',
-        message: '上游分支名称:',
-        initial: 'master',
-      })
-    }
+/** Ask only for the fields the config file and command line left unset. */
+export async function collectMissingOptions(config: SyncConfig): Promise<SyncConfig> {
+  logger.info(bold(cyan('\n🔄 仓库目录同步工具')))
 
-    if (initialOptions.companyBranch === undefined) {
-      // 目标仓库分支 - 总是提示，即使有默认值
-      promptQuestions.push({
-        type: 'text',
-        name: 'companyBranch',
-        message: '目标仓库分支名称:',
-        initial: initialOptions.companyBranch || 'master',
-      })
-    }
+  const questions: prompts.PromptObject[] = []
 
-    // 提交消息
-    if (initialOptions.message === undefined) {
-      promptQuestions.push({
-        type: 'text',
-        name: 'commitMessage',
-        message: '提交消息:',
-        initial: 'Sync upstream changes',
-      })
-    }
-
-    // 自动推送
-    if (initialOptions.autoPush === undefined) {
-      promptQuestions.push({
-        type: 'confirm',
-        name: 'autoPush',
-        message: '是否自动推送到目标仓库?',
-        initial: true,
-      })
-    }
-
-    // 最大重试次数
-    if (initialOptions.retryConfig?.maxRetries === undefined) {
-      promptQuestions.push({
-        type: 'number',
-        name: 'maxRetries',
-        message: '网络请求最大重试次数:',
-        initial: 3,
-        min: 0,
-      })
-    }
-
-    // 初始重试延迟
-    if (initialOptions.retryConfig?.initialDelay === undefined) {
-      promptQuestions.push({
-        type: 'number',
-        name: 'initialDelay',
-        message: '初始重试延迟时间(毫秒):',
-        initial: 2000,
-        min: 100,
-      })
-    }
-
-    // 重试退避因子
-    if (initialOptions.retryConfig?.backoffFactor === undefined) {
-      promptQuestions.push({
-        type: 'number',
-        name: 'backoffFactor',
-        message: '重试退避因子:',
-        initial: 1.5,
-        min: 1,
-        max: 5,
-        float: true,
-      })
-    }
-
-    // 并发限制
-    if (initialOptions.concurrencyLimit === undefined) {
-      promptQuestions.push({
-        type: 'number',
-        name: 'concurrencyLimit',
-        message: '并行处理的最大文件数量:',
-        initial: 5,
-        min: 1,
-        max: 20,
-      })
-    }
-
-    // 预览模式
-    if (initialOptions.previewOnly === undefined) {
-      promptQuestions.push({
-        type: 'confirm',
-        name: 'previewOnly',
-        message: '是否启用预览模式?',
-        initial: false,
-      })
-    }
-
-    // 只有当有问题需要提问时才调用prompts
-    const response = promptQuestions.length > 0
-      ? await prompts(promptQuestions, { onCancel: () => process.exit(0) })
-      : {}
-
-    return {
-      ...initialOptions,
-      confirm: true,
-      // 只覆盖用户实际输入的选项
-      ...response,
-      // 处理重试配置
-      retryConfig: {
-        ...initialOptions.retryConfig,
-        ...(response.maxRetries !== undefined && { maxRetries: response.maxRetries }),
-        ...(response.initialDelay !== undefined && { initialDelay: response.initialDelay }),
-        ...(response.backoffFactor !== undefined && { backoffFactor: response.backoffFactor }),
-      },
-    } as SyncOptions
-  }
-  // 交互式模式下显示完整提示
-  console.log(bold(cyan('\n🔄 仓库目录同步工具\n')))
-
-  const response = await prompts([
-    {
+  if (!config.upstreamRepo) {
+    questions.push({
       type: 'text',
       name: 'upstreamRepo',
       message: '上游仓库 URL:',
-      initial: initialOptions.upstreamRepo || '',
       validate: value => value.trim() ? true : '仓库 URL 不能为空',
-    },
-    {
-      type: 'text',
-      name: 'upstreamBranch',
-      message: '上游分支名称:',
-      initial: initialOptions.upstreamBranch || 'master',
-    },
-    {
-      type: 'text',
-      name: 'companyBranch',
-      message: '目标仓库分支名称:',
-      initial: initialOptions.companyBranch || 'master',
-    },
-    {
+    })
+  }
+  if (!config.syncDirs || config.syncDirs.length === 0) {
+    questions.push({
       type: 'list',
       name: 'syncDirs',
-      message: '要同步的目录(用逗号分隔):',
-      initial: initialOptions.syncDirs?.join(',') || '',
+      message: '要同步的目录（逗号分隔）:',
       separator: ',',
-      format: value => value.map((item: string) => item.trim()).filter(Boolean),
-    },
-    {
+      format: (value: string[]) => value.map(item => item.trim()).filter(Boolean),
+      validate: value => value.length > 0 ? true : '至少要有一个目录',
+    })
+  }
+  if (!config.upstreamBranch) {
+    questions.push({ type: 'text', name: 'upstreamBranch', message: '上游分支名称:', initial: 'main' })
+  }
+  if (!config.companyBranch) {
+    questions.push({ type: 'text', name: 'companyBranch', message: '目标仓库分支名称:', initial: 'main' })
+  }
+  if (!config.commitMessage) {
+    questions.push({
       type: 'text',
       name: 'commitMessage',
       message: '提交消息:',
-      initial: initialOptions.commitMessage || 'Sync upstream changes',
-    },
-    {
-      type: 'confirm',
-      name: 'autoPush',
-      message: '是否自动推送到目标仓库?',
-      initial: initialOptions.autoPush !== undefined ? initialOptions.autoPush : true,
-    },
-    {
-      type: 'number',
-      name: 'maxRetries',
-      message: '网络请求最大重试次数:',
-      initial: initialOptions.retryConfig?.maxRetries || 3,
-      min: 0,
-    },
-    {
-      type: 'number',
-      name: 'initialDelay',
-      message: '初始重试延迟时间(毫秒):',
-      initial: initialOptions.retryConfig?.initialDelay || 2000,
-      min: 100,
-    },
-    {
-      type: 'number',
-      name: 'backoffFactor',
-      message: '重试退避因子:',
-      initial: initialOptions.retryConfig?.backoffFactor || 1.5,
-      min: 1,
-      max: 5,
-      float: true,
-    },
-    {
-      type: 'number',
-      name: 'concurrencyLimit',
-      message: '并行处理的最大文件数量:',
-      initial: initialOptions.concurrencyLimit || 5,
-      min: 1,
-      max: 20,
-    },
-    {
-      type: 'confirm',
-      name: 'previewOnly',
-      message: '是否启用预览模式? (只显示变更，不实际修改文件)',
-      initial: initialOptions.previewOnly !== undefined ? initialOptions.previewOnly : false,
-    },
-    {
-      type: 'confirm',
-      name: 'confirm',
-      message: '确认开始同步?',
-      initial: true,
-    },
-  ])
-
-  if (!response.confirm) {
-    console.log(yellow('操作已取消'))
-    process.exit(0)
+      initial: 'Sync upstream changes',
+    })
   }
+
+  questions.push(
+    { type: 'confirm', name: 'autoPush', message: '同步后自动推送到目标分支?', initial: config.autoPush },
+    { type: 'confirm', name: 'previewOnly', message: '启用预览模式（不修改工作区）?', initial: config.previewOnly },
+    { type: 'number', name: 'concurrencyLimit', message: '失败重试时的并发文件数:', initial: config.concurrencyLimit, min: 1, max: 50 },
+    { type: 'select', name: 'defaultStrategy', message: '冲突处理方式:', choices: conflictChoices(), initial: indexOfStrategy(config.conflictResolutionConfig.defaultStrategy) },
+    { type: 'confirm', name: 'confirm', message: '确认开始同步?', initial: true },
+  )
+
+  const { confirm, defaultStrategy, ...answers } = await prompts(questions, SIGNAL)
+  if (confirm === false)
+    cancelled()
 
   return {
-    upstreamRepo: response.upstreamRepo,
-    upstreamBranch: response.upstreamBranch,
-    companyBranch: response.companyBranch,
-    syncDirs: response.syncDirs,
-    commitMessage: response.commitMessage,
-    autoPush: response.autoPush,
-    previewOnly: response.previewOnly,
-    retryConfig: {
-      maxRetries: response.maxRetries,
-      initialDelay: response.initialDelay,
-      backoffFactor: response.backoffFactor,
+    ...config,
+    ...answers,
+    nonInteractive: false,
+    conflictResolutionConfig: {
+      ...config.conflictResolutionConfig,
+      defaultStrategy: defaultStrategy as ConflictResolutionStrategy,
     },
-    concurrencyLimit: response.concurrencyLimit,
-  }
+  } as SyncConfig
 }
 
-export function displaySummary(options: SyncOptions) {
-  console.log(bold(blue('\n🔍 配置摘要:')))
-  console.log(cyan(`  - 上游仓库: ${options.upstreamRepo}`))
-  console.log(cyan(`  - 上游分支: ${options.upstreamBranch}`))
-  console.log(cyan(`  - 目标仓库分支: ${options.companyBranch}`))
-  console.log(yellow(`  - 同步目录: ${options.syncDirs.join(',')}`))
-  console.log(magenta(`  - 提交消息: ${options.commitMessage}`))
-  console.log(green(`  - 自动推送: ${options.autoPush ? '是' : '否'}`))
-  console.log(yellow(`  - 预览模式: ${options.previewOnly ? '启用' : '禁用'}`))
-  console.log(blue(`  - 最大重试次数: ${options.retryConfig?.maxRetries || 3}`))
-  console.log(blue(`  - 初始重试延迟: ${options.retryConfig?.initialDelay || 2000}ms`))
-  console.log(blue(`  - 重试退避因子: ${options.retryConfig?.backoffFactor || 1.5}`))
-  console.log(bold(blue(`${'='.repeat(40)}\n`)))
+function conflictChoices() {
+  return [
+    { title: '逐个文件询问', value: ConflictResolutionStrategy.PROMPT_USER },
+    { title: '采用上游版本（覆盖本地）', value: ConflictResolutionStrategy.USE_SOURCE },
+    { title: '保留本地版本', value: ConflictResolutionStrategy.KEEP_TARGET },
+    { title: '自动三方合并（冲突写标记）', value: ConflictResolutionStrategy.AUTO_MERGE },
+    { title: '跳过冲突文件', value: ConflictResolutionStrategy.SKIP },
+  ]
+}
+
+function indexOfStrategy(strategy: ConflictResolutionStrategy): number {
+  const index = conflictChoices().findIndex(choice => choice.value === strategy)
+  return index === -1 ? 0 : index
+}
+
+/** Per-file conflict question; returning null means "keep local" (the resolver's default). */
+export const conflictPrompt: ConflictPrompt = async (candidate: ConflictCandidate) => {
+  const answer = await prompts({
+    type: 'select',
+    name: 'strategy',
+    message: `冲突 ${candidate.path}（${candidate.conflictType}）如何处理?`,
+    choices: conflictChoices().filter(choice => choice.value !== ConflictResolutionStrategy.PROMPT_USER),
+  }, { onCancel: () => undefined })
+  return (answer.strategy as ConflictResolutionStrategy | undefined) ?? null
+}
+
+export function displaySummary(config: SyncConfig, source: string | null): void {
+  logger.info(bold(blue('\n🔍 配置摘要:')))
+  logger.info(cyan(`  - 配置文件: ${source ?? '（未找到，使用默认值 + 命令行）'}`))
+  logger.info(cyan(`  - 上游仓库: ${config.upstreamRepo}`))
+  logger.info(cyan(`  - 上游分支: ${config.upstreamBranch}`))
+  logger.info(cyan(`  - 目标分支: ${config.companyBranch}`))
+  logger.info(yellow(`  - 同步目录: ${config.syncDirs.join(', ')}`))
+  logger.info(magenta(`  - 提交消息: ${config.commitMessage}`))
+  logger.info(green(`  - 自动推送: ${config.autoPush ? '是' : '否'}`))
+  logger.info(green(`  - 强制覆盖: ${config.forceOverwrite ? '是' : '否（增量，按已同步 oid 跳过）'}`))
+  logger.info(yellow(`  - 预览模式: ${config.previewOnly ? '启用' : '禁用'}`))
+  logger.info(blue(`  - 重试: ${config.retryConfig.maxRetries} 次，初始 ${config.retryConfig.initialDelay}ms，因子 ${config.retryConfig.backoffFactor}`))
+  logger.info(blue(`  - 冲突策略: ${config.conflictResolutionConfig.defaultStrategy}`))
+  if (config.grayReleaseConfig?.enable) {
+    logger.info(bold(yellow(`  - 灰度发布: ${config.grayReleaseConfig.strategy} ${config.grayReleaseConfig.percentage ?? ''}%`)))
+  }
+  logger.info(bold(blue(`${'='.repeat(40)}\n`)))
 }

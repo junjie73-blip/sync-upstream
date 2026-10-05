@@ -19,6 +19,8 @@ const config: Config = {
   coverageDirectory: './coverage',
   coverageReporters: ['text', 'lcov', 'clover'],
   collectCoverageFrom: ['src/**/*.ts', '!src/**/index.ts', '!src/**/types.ts'],
+  // Fixture suites shell out to real git; the 5s default only holds when suites run serially.
+  testTimeout: 30000,
 }
 
 export default config

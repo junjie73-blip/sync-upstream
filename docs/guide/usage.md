@@ -1,236 +1,71 @@
-# 使用指南
+# 使用总览
 
-配置完成后，您可以通过以下方式使用sync-upstream工具。
+本页给出一次运行的完整骨架和各个专项文档的入口。具体操作细节按功能拆在独立页面，按需跳转即可。
 
-## 非交互式模式
+## 从哪里开始
 
-您可以使用非交互式模式跳过交互式提示，直接使用配置文件或命令行参数提供的设置运行同步。
+| 你想做什么 | 去这一页 |
+|---|---|
+| 先判断该不该用这个工具 | [与 fork 同步的对比](/guide/vs-fork-sync) |
+| 第一次装好、跑通预览 | [快速开始](/guide/quick-start) |
+| 看懂计划输出、执行真实同步、理解提交边界 | [同步基础](/guide/sync-basics) |
+| 处理本地与上游都改过的文件 | [冲突处理](/guide/conflicts) |
+| 先发一小部分验证，再全量或回滚 | [灰度发布](/guide/gray-release) |
+| 上游有 push 就自动同步 | [Webhook 守护模式](/guide/webhook) |
+| 接到流水线 / 定时任务里 | [自动化与退出码](/guide/automation) |
+| 逐条查命令行参数与别名 | [CLI 参考](/reference/cli) |
+| 改配置字段、查运行留下的文件能不能删 | [配置参考](/reference/configuration) 与 [运行产物与清理](/reference/configuration#运行产物与清理) |
 
-```bash
-# 使用非交互式模式
+## 一次运行会发生什么
 
-sync-upstream -y
-# 或
+1. 读取配置（默认值 → 配置文件 → 命令行，后者覆盖前者）并做完整性校验，有问题当场报完
+2. 确认当前目录是 Git 仓库、目标分支可用
+3. 拉取上游分支（网络类失败会按重试策略退避重试）
+4. 算出这次要变更的路径清单，套用忽略规则与扩展名白名单
+5. 标出本地与上游都有改动的冲突文件
+6. 打印清单——预览模式到这里就结束了
+7. 真实运行才会：解决冲突 → 写入上游内容 → 提交本次应用的路径 → 记录增量基线 → 按需推送
 
-sync-upstream --non-interactive
-```
+预览看到的每一行，就是第 7 步提交里出现的每一行；两者是同一份清单。
 
-### 智能参数提示
-
-非交互式模式会**智能地只提示未通过配置参数提供的选项**，已通过配置文件或命令行参数提供的值将被直接使用，不会再次提示。这使得自动化脚本更加简洁高效。
-
-例如，如果您提供了仓库URL、分支和同步目录，非交互式模式将只提示网络请求重试配置和并发限制等未提供的参数：
-
-```bash
-# 提供部分参数的非交互式模式示例 (使用完整参数)
-
-sync-upstream -y --repo https://github.com/example/repo --dirs src --branch main --company-branch develop
-
-# 使用简写参数
-
-sync-upstream -y -r https://github.com/example/repo -d src -b main -c develop
-```
-
-非交互式模式特别适用于自动化脚本或CI/CD环境中。
-
-## 基本使用
-
-## 基本使用
-
-### 同步代码
-
-在项目根目录下运行以下命令：
+## 先看再动
 
 ```bash
-sync-upstream
+sync-upstream -P            # 预览：不修改工作区、不切分支、不提交
+sync-upstream -n            # 同上，脚本习惯用 dry-run
+sync-upstream -P -V         # 预览并列出全部变更路径（默认只显示前 40 条）
 ```
 
-该命令会根据配置文件中的设置，同步上游仓库的代码到目标仓库。
+计划输出形如：
 
-### 指定配置文件
+```
+计划: 163 项变更 (源 refs/remotes/sync-upstream/main → 目标 company/main)
++ packages/shared/src/new-file.ts (packages/shared)
+~ packages/runtime-core/src/index.ts (packages/runtime-core)
+- packages/shared/src/old.ts (packages/shared)
+冲突: 2 个文件本地与上游都有改动
+  ! packages/shared/src/const.ts [content]
+跳过 7 个文件 — 被忽略规则排除
+本地已修改文件 3 个（仅同步目录内）
+```
 
-如果您的配置文件不在默认位置，可以使用 `--config` 选项或其简写 `-C` 指定：
+`+` 新增、`~` 修改、`-` 删除。逐行含义与"已是最新 / 不在同步目录内"等跳过条件见 [同步基础](/guide/sync-basics)。
+
+## 三件容易踩的事
+
+- **预览也会写 `.git`**：它会添加/更新 `sync-upstream` remote 并 fetch，只是不动工作区、不切分支、不提交。离线场景下 fetch 失败会直接报错。
+- **`syncDirs` 既能写目录也能写单个文件路径**，"只同步一个文件"不需要特殊模式，见 [单文件与局部同步](/guide/automation#单文件与局部同步)。
+- **`-y` 不等于绝对不问**：只要配置里缺 `upstreamRepo` 或 `syncDirs` 为空，仍会进入追问补全。CI 里请保证配置完整，见 [自动化与退出码](/guide/automation)。
+
+## 常用动作速查
 
 ```bash
-sync-upstream --config=path/to/your/config.js
-# 或使用简写
-
-sync-upstream -C path/to/your/config.js
+sync-upstream -y -C sync-upstream.config.json --push   # 非交互同步并推送
+sync-upstream --conflict-strategy auto-merge           # 冲突走三方合并
+sync-upstream -gr --percentage 20 -V                   # 灰度先发 20%
+sync-upstream -gr --full-release                       # 灰度验证通过后补齐全量
+sync-upstream -gr --rollback                           # 回到灰度之前
+sync-upstream -we --webhook-port 3000                  # Webhook 守护
 ```
 
-### 覆盖配置项
-
-您可以通过命令行参数覆盖配置文件中的配置项：
-
-```bash
-sync-upstream --upstreamBranch=dev --targetBranch=develop
-```
-
-## 高级用法
-
-### 预览模式
-
-默认情况下，sync-upstream 会运行在预览模式，只显示将要进行的更改，而不会实际修改文件。您可以通过以下方式禁用预览模式：
-
-```bash
-sync-upstream --previewMode=false
-```
-
-或者在配置文件中设置：
-
-```javascript
-module.exports = {
-  // ...其他配置
-  previewMode: false
-}
-```
-
-### 冲突解决
-
-当出现代码冲突时，sync-upstream 会根据配置的冲突解决策略进行处理：
-
-- `ask`: 询问用户如何解决冲突（默认）
-- `ours`: 使用目标仓库的代码
-- `theirs`: 使用上游仓库的代码
-
-您可以通过以下方式指定冲突解决策略：
-
-```bash
-sync-upstream --conflictResolution=theirs
-```
-
-或者在配置文件中设置：
-
-```javascript
-module.exports = {
-  // ...其他配置
-  conflictResolution: 'theirs'
-}
-```
-
-### 忽略文件
-
-您可以配置忽略某些文件或目录，使其不会被同步：
-
-```javascript
-module.exports = {
-  // ...其他配置
-  ignorePatterns: [
-    'node_modules/**',
-    'dist/**',
-    '*.log'
-  ]
-}
-```
-
-### 灰度发布
-
-sync-upstream 支持灰度发布功能，可以帮助您以可控方式逐步将上游变更同步到生产环境，并在出现问题时快速回滚。
-
-#### 启用灰度发布模式
-
-您可以通过以下命令启用灰度发布模式：
-
-```bash
-sync-upstream --gray-release
-# 或使用简写
-
-sync-upstream --gr
-
-# 带参数的示例
-
-sync-upstream --gr --repo https://github.com/example/repo --dirs src --branch main --company-branch company/gray
-# 或使用简写参数
-
-sync-upstream -gr -r https://github.com/example/repo -d src -b main -c company/gray
-```
-
-启用灰度发布模式后，工具将根据配置的策略进行灰度发布。
-
-#### 执行全量发布
-
-当您确认灰度发布的变更没有问题后，可以执行全量发布：
-
-```bash
-sync-upstream --full-release
-# 或使用简写
-
-sync-upstream --fr
-
-# 带参数的示例
-
-sync-upstream --fr --repo https://github.com/example/repo --dirs src --branch main --company-branch company/release
-# 或使用简写参数
-
-sync-upstream -fr -r https://github.com/example/repo -d src -b main -c company/release
-```
-
-#### 执行回滚操作
-
-如果在灰度发布过程中发现问题，可以执行回滚操作：
-
-```bash
-sync-upstream --rollback
-# 或使用简写
-
-sync-upstream --ro
-
-# 带参数的示例
-
-sync-upstream --ro --repo https://github.com/example/repo --dirs src --branch main --company-branch company/rollback
-# 或使用简写参数
-
-sync-upstream -ro -r https://github.com/example/repo -d src -b main -c company/rollback
-```
-
-#### 配置文件示例
-
-您可以在配置文件中详细配置灰度发布选项：
-
-```javascript
-module.exports = {
-  // ...其他配置
-  grayRelease: {
-    enable: true,
-    strategy: 'PERCENTAGE', // 可选值: 'PERCENTAGE', 'DIRECTORY', 'FILE'
-    percentage: 30, // 当策略为PERCENTAGE时使用，表示初始同步30%的文件
-    canaryDirs: ['src/utils', 'src/components'], // 当策略为DIRECTORY时使用，指定金丝雀目录
-    validationScript: './scripts/validate.sh', // 自动验证脚本路径
-    maxRetries: 3, // 验证失败重试次数
-    rollbackOnFailure: true, // 验证失败时是否自动回滚
-    auditLogPath: './logs/gray-release.log' // 审计日志路径
-  }
-}
-```
-
-#### 灰度发布策略
-
-sync-upstream 支持三种灰度发布策略：
-
-1. `PERCENTAGE`: 按百分比发布，只同步指定百分比的文件
-2. `DIRECTORY`: 按目录发布，只同步指定的目录
-3. `FILE`: 按文件发布，只同步匹配指定模式的文件
-
-## 示例
-
-### 示例1：基本同步
-
-```bash
-sync-upstream
-```
-
-### 示例2：指定分支并禁用预览模式
-
-```bash
-sync-upstream --upstreamBranch=dev --targetBranch=develop --previewMode=false
-```
-
-### 示例3：使用特定配置文件
-
-```bash
-sync-upstream --config=./sync-config.js
-```
-
-## 下一步
-
-了解更多高级功能，请查看 [API 参考](/reference/api) 部分。
+每条命令的行为边界在对应专项页面里说明；参数全集在 [CLI 参考](/reference/cli)。

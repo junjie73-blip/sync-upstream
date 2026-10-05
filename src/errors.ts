@@ -1,250 +1,135 @@
-import { blue, bold, red, yellow } from 'picocolors'
+import { red, yellow } from 'picocolors'
 import { logger } from './logger'
 
-// 错误类型枚举
-export enum ErrorType {
+export enum ErrorCode {
   CONFIG = 'CONFIG_ERROR',
+  VALIDATION = 'VALIDATION_ERROR',
   GIT = 'GIT_ERROR',
+  REPO_PATH = 'REPO_PATH_ERROR',
   FS = 'FS_ERROR',
   NETWORK = 'NETWORK_ERROR',
-  USER_CANCEL = 'USER_CANCEL',
-  SYNC_PROCESS = 'SYNC_PROCESS_ERROR',
   CONFLICT = 'CONFLICT_ERROR',
   AUTHENTICATION = 'AUTH_ERROR',
   PERMISSION = 'PERMISSION_ERROR',
   TIMEOUT = 'TIMEOUT_ERROR',
-  VALIDATION = 'VALIDATION_ERROR',
+  SYNC_PROCESS = 'SYNC_PROCESS_ERROR',
+  USER_CANCEL = 'USER_CANCEL',
 }
 
-// 错误严重程度枚举
-export enum ErrorSeverity {
-  INFO = 'info',
-  WARNING = 'warning',
-  ERROR = 'error',
-  CRITICAL = 'critical',
-}
+export type ErrorSeverity = 'info' | 'warning' | 'error' | 'critical'
 
-/**
- * 自定义错误基类
- */
 export abstract class SyncError extends Error {
-  public readonly code: string
-  public readonly originalError?: Error
-  public readonly timestamp: Date
-  public readonly severity: ErrorSeverity
-  public readonly context?: Record<string, any>
+  abstract readonly code: ErrorCode
+  readonly severity: ErrorSeverity = 'error'
+  readonly originalError?: Error
+  readonly context?: Record<string, unknown>
+  readonly timestamp: Date = new Date()
 
-  constructor(
-    message: string,
-    code: string,
-    severity: ErrorSeverity = ErrorSeverity.ERROR,
-    originalError?: Error,
-    context?: Record<string, any>,
-  ) {
+  constructor(message: string, originalError?: Error, context?: Record<string, unknown>) {
     super(message)
-    this.code = code
-    this.severity = severity
+    this.name = new.target.name
     this.originalError = originalError
-    this.timestamp = new Date()
     this.context = context
-    this.name = this.constructor.name
-
-    // 修复继承链
     Object.setPrototypeOf(this, new.target.prototype)
   }
 
-  /**
-   * 显示友好的错误信息
-   */
-  public display(): void {
-    const severityColor = this.getSeverityColor()
-    console.error(severityColor(`
-❌ ${this.name} (${this.code}):`))
-    console.error(severityColor(this.message))
-
-    if (this.context) {
-      console.error(blue('错误上下文:'))
-      console.error(blue(JSON.stringify(this.context, null, 2)))
-    }
-
-    if (this.originalError) {
-      console.error(yellow('原始错误:'))
-      console.error(yellow(this.originalError.message))
-      // 记录完整错误栈到日志
-      logger.error(`原始错误栈: ${this.originalError.stack || '无'}`)
-    }
-
-    // 记录错误到日志
-    this.logError()
+  /** Message plus the underlying git/fs detail, for one-line operator troubleshooting. */
+  describe(): string {
+    const parts = [this.message]
+    if (this.originalError?.message)
+      parts.push(`原始错误: ${this.originalError.message}`)
+    if (this.context && Object.keys(this.context).length > 0)
+      parts.push(JSON.stringify(this.context))
+    return parts.join('\n')
   }
 
-  /**
-   * 根据错误严重程度获取对应的颜色
-   */
-  private getSeverityColor() {
-    switch (this.severity) {
-      case ErrorSeverity.INFO:
-        return blue
-      case ErrorSeverity.WARNING:
-        return yellow
-      case ErrorSeverity.ERROR:
-        return red
-      case ErrorSeverity.CRITICAL:
-        return bold(red)
-      default:
-        return red
-    }
-  }
-
-  /**
-   * 记录错误到日志
-   */
-  private logError(): void {
-    const errorData = {
-      name: this.name,
-      code: this.code,
-      message: this.message,
-      severity: this.severity,
-      timestamp: this.timestamp.toISOString(),
-      context: this.context,
-      originalError: this.originalError?.message,
-    }
-
-    switch (this.severity) {
-      case ErrorSeverity.INFO:
-        logger.info(JSON.stringify(errorData))
-        break
-      case ErrorSeverity.WARNING:
-        logger.warn(JSON.stringify(errorData))
-        break
-      case ErrorSeverity.ERROR:
-        logger.error(JSON.stringify(errorData))
-        break
-      case ErrorSeverity.CRITICAL:
-        logger.error(bold(red(JSON.stringify(errorData))))
-        break
-    }
+  report(): void {
+    const text = this.describe()
+    if (this.severity === 'warning')
+      logger.warn(text)
+    else if (this.severity === 'info')
+      logger.info(text)
+    else logger.error(text, this.originalError)
   }
 }
 
-/**
- * 配置错误
- */
 export class ConfigError extends SyncError {
-  constructor(message: string, originalError?: Error, context?: Record<string, any>) {
-    super(message, ErrorType.CONFIG, ErrorSeverity.ERROR, originalError, context)
-  }
+  readonly code = ErrorCode.CONFIG
 }
 
-/**
- * Git 错误
- */
-export class GitError extends SyncError {
-  constructor(message: string, originalError?: Error, context?: Record<string, any>) {
-    super(message, ErrorType.GIT, ErrorSeverity.ERROR, originalError, context)
-  }
-}
-
-/**
- * 文件系统错误
- */
-export class FsError extends SyncError {
-  constructor(message: string, originalError?: Error, context?: Record<string, any>) {
-    super(message, ErrorType.FS, ErrorSeverity.ERROR, originalError, context)
-  }
-}
-
-/**
- * 网络错误
- */
-export class NetworkError extends SyncError {
-  constructor(message: string, originalError?: Error, context?: Record<string, any>) {
-    super(message, ErrorType.NETWORK, ErrorSeverity.WARNING, originalError, context)
-  }
-}
-
-/**
- * 用户取消操作错误
- */
-export class UserCancelError extends SyncError {
-  constructor(message: string = '用户取消了操作', context?: Record<string, any>) {
-    super(message, ErrorType.USER_CANCEL, ErrorSeverity.INFO, undefined, context)
-  }
-}
-
-/**
- * 同步过程错误
- */
-export class SyncProcessError extends SyncError {
-  constructor(message: string, originalError?: Error, context?: Record<string, any>) {
-    super(message, ErrorType.SYNC_PROCESS, ErrorSeverity.ERROR, originalError, context)
-  }
-}
-
-/**
- * 冲突错误
- */
-export class ConflictError extends SyncError {
-  constructor(message: string, originalError?: Error, context?: Record<string, any>) {
-    super(message, ErrorType.CONFLICT, ErrorSeverity.ERROR, originalError, context)
-  }
-}
-
-/**
- * 认证错误
- */
-export class AuthenticationError extends SyncError {
-  constructor(message: string, originalError?: Error, context?: Record<string, any>) {
-    super(message, ErrorType.AUTHENTICATION, ErrorSeverity.CRITICAL, originalError, context)
-  }
-}
-
-/**
- * 权限错误
- */
-export class PermissionError extends SyncError {
-  constructor(message: string, originalError?: Error, context?: Record<string, any>) {
-    super(message, ErrorType.PERMISSION, ErrorSeverity.ERROR, originalError, context)
-  }
-}
-
-/**
- * 超时错误
- */
-export class TimeoutError extends SyncError {
-  constructor(message: string, originalError?: Error, context?: Record<string, any>) {
-    super(message, ErrorType.TIMEOUT, ErrorSeverity.WARNING, originalError, context)
-  }
-}
-
-/**
- * 验证错误
- */
 export class ValidationError extends SyncError {
-  constructor(message: string, originalError?: Error, context?: Record<string, any>) {
-    super(message, ErrorType.VALIDATION, ErrorSeverity.WARNING, originalError, context)
+  readonly code = ErrorCode.VALIDATION
+}
+
+export class GitError extends SyncError {
+  readonly code = ErrorCode.GIT
+}
+
+export class RepoPathError extends SyncError {
+  readonly code = ErrorCode.REPO_PATH
+}
+
+export class FsError extends SyncError {
+  readonly code = ErrorCode.FS
+}
+
+export class NetworkError extends SyncError {
+  readonly code = ErrorCode.NETWORK
+  override readonly severity: ErrorSeverity = 'warning'
+}
+
+export class ConflictError extends SyncError {
+  readonly code = ErrorCode.CONFLICT
+}
+
+export class AuthenticationError extends SyncError {
+  readonly code = ErrorCode.AUTHENTICATION
+  override readonly severity: ErrorSeverity = 'critical'
+}
+
+export class PermissionError extends SyncError {
+  readonly code = ErrorCode.PERMISSION
+}
+
+export class TimeoutError extends SyncError {
+  readonly code = ErrorCode.TIMEOUT
+  override readonly severity: ErrorSeverity = 'warning'
+}
+
+export class SyncProcessError extends SyncError {
+  readonly code = ErrorCode.SYNC_PROCESS
+}
+
+export class UserCancelError extends SyncError {
+  readonly code = ErrorCode.USER_CANCEL
+  override readonly severity: ErrorSeverity = 'info'
+
+  constructor(message = '用户取消了操作', context?: Record<string, unknown>) {
+    super(message, undefined, context)
   }
 }
 
-/**
- * 错误处理工具函数
- */
-export function handleError(error: Error): void {
-  if (error instanceof SyncError) {
-    error.display()
+export function isSyncError(error: unknown): error is SyncError {
+  return error instanceof SyncError
+}
 
-    // 根据错误严重程度决定是否退出进程
-    if (error.severity === ErrorSeverity.CRITICAL) {
-      logger.error('发生严重错误，程序将退出')
-      process.exit(1)
-    }
-  }
-  else {
-    const unknownError = new SyncProcessError(
-      '发生未知错误',
-      error,
-    )
-    unknownError.display()
-    process.exit(1)
-  }
+export function toError(value: unknown): Error {
+  if (value instanceof Error)
+    return value
+  return new Error(String(value))
+}
+
+/** Exit code per failure class: 1 unexpected, 2 config/validation, 3 git, 4 user cancelled. */
+export function exitCodeFor(error: unknown): number {
+  if (error instanceof UserCancelError)
+    return 4
+  if (error instanceof ConfigError || error instanceof ValidationError)
+    return 2
+  if (error instanceof GitError)
+    return 3
+  return 1
+}
+
+export function formatUnknownError(error: unknown): string {
+  return red(`未预期的错误: ${yellow(toError(error).message)}`)
 }

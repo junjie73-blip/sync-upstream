@@ -4,13 +4,13 @@
   "description": "A tool for synchronizing code with upstream repositories with incremental updates and parallel processing.",
   "author": "flow-zy",
   "license": "MIT",
-  "homepage": "https://flow-zy.github.io/sync-upstream/",
+  "homepage": "https://github.com/junjie73-blip/sync-upstream.git",
   "repository": {
     "type": "git",
-    "url": "https://github.com/flow-zy/sync-upstream.git"
+    "url": "https://github.com/junjie73-blip/sync-upstream.git"
   },
   "bugs": {
-    "url": "https://github.com/flow-zy/sync-upstream/issues"
+    "url": "https://github.com/junjie73-blip/sync-upstream/issues"
   },
   "keywords": [
     "sync",
@@ -79,6 +79,7 @@
     "@types/js-yaml": "^4.0.9",
     "@types/minimist": "^1.2.5",
     "@types/node": "^24.1.0",
+    "@types/picomatch": "^4.0.3",
     "@types/prompts": "^2.4.9",
     "eslint": "^9.32.0",
     "eslint-config-prettier": "^10.1.8",

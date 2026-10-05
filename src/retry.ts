@@ -1,7 +1,5 @@
-import { NetworkError } from './errors'
+import { NetworkError, TimeoutError, toError } from './errors'
 import { logger } from './logger'
-
-type RetryableFunction<T> = () => Promise<T>
 
 export interface RetryConfig {
   maxRetries: number
@@ -9,51 +7,54 @@ export interface RetryConfig {
   backoffFactor: number
 }
 
-/**
- * 通用重试工具函数
- * @param fn 要执行的异步函数
- * @param config 重试配置
- * @param isNetworkError 判断是否为网络错误的函数
- * @returns 函数执行结果
- */
-export async function withRetry<T>(
-  fn: RetryableFunction<T>,
-  config: RetryConfig,
-  isNetworkError: (error: Error) => boolean = (error) => {
-    const message = error.message.toLowerCase()
-    return message.includes('network') || message.includes('connect')
-  },
-): Promise<T> {
-  let lastError: Error
+export interface RetryOptions extends RetryConfig {
+  /** Decides whether a failure is worth another attempt; defaults to the transient-error pattern. */
+  isRetryable?: (error: Error) => boolean
+}
 
-  for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
+const DEFAULT_RETRYABLE = /网络|network|connect|resolve host|timed out|timeout|reset|closed|RPC failed|early EOF|无法访问|不可达/i
+
+function delayFor(config: RetryConfig, attempt: number): number {
+  return Math.round(config.initialDelay * config.backoffFactor ** (attempt - 1))
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms)
+    timer.unref()
+  })
+}
+
+/**
+ * Retry a transient operation with exponential backoff. Non-retryable failures and the
+ * exhausted-retry case keep the original error type, so `exitCodeFor` still classifies them.
+ */
+export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions): Promise<T> {
+  const isRetryable = options.isRetryable ?? (error => DEFAULT_RETRYABLE.test(error.message))
+  let lastError: Error | undefined
+
+  for (let attempt = 0; attempt <= options.maxRetries; attempt++) {
     try {
-      if (attempt > 0) {
-        const delay = config.initialDelay * config.backoffFactor ** (attempt - 1)
-        logger.info(`正在进行第 ${attempt}/${config.maxRetries} 次重试，延迟 ${delay}ms...`)
-        await new Promise(resolve => setTimeout(resolve, delay))
-      }
       return await fn()
     }
     catch (error) {
-      lastError = error as Error
+      const current = toError(error)
+      if (!isRetryable(current))
+        throw current
+      lastError = current
 
-      // 只有网络错误才重试
-      if (!isNetworkError(lastError)) {
-        logger.error(`非网络错误，不进行重试: ${lastError.message}`)
-        throw lastError
-      }
-
-      // 如果达到最大重试次数，则抛出错误
-      if (attempt >= config.maxRetries) {
-        logger.error(`达到最大重试次数(${config.maxRetries})，请求失败: ${lastError.message}`)
-        throw new NetworkError('网络请求失败', lastError)
-      }
-
-      logger.warn(`请求失败(第 ${attempt} 次尝试): ${lastError.message}`)
+      if (attempt === options.maxRetries)
+        break
+      const delay = delayFor(options, attempt + 1)
+      logger.warn(`第 ${attempt + 1}/${options.maxRetries} 次重试，${delay}ms 后继续: ${current.message}`)
+      await wait(delay)
     }
   }
 
-  // 理论上不会到达这里，但为了类型安全
-  throw lastError!
+  const message = `重试 ${options.maxRetries} 次后仍然失败: ${lastError?.message ?? '未知原因'}`
+  return Promise.reject(/超时|timeout/i.test(lastError?.message ?? '')
+    ? new TimeoutError(message, lastError)
+    : new NetworkError(message, lastError))
 }
+
+export { DEFAULT_RETRYABLE as TRANSIENT_ERROR_PATTERN }
