@@ -9,6 +9,7 @@ import type {
 import { ConflictResolutionStrategy } from '../domain/conflict'
 import { toError, ValidationError } from '../errors'
 import { extensionOf } from '../fsx/paths'
+import { t } from '../i18n'
 import { logger } from '../logger'
 import { threeWayMerge } from './merge'
 
@@ -108,7 +109,7 @@ export class ConflictResolver {
       case ConflictResolutionStrategy.SKIP:
         return { strategy, action: 'skip', detail: '跳过该文件' }
       default:
-        throw new ValidationError(`未知的冲突解决策略: ${String(strategy)}`, undefined, { path: candidate.path })
+        throw new ValidationError(t('e.unknownStrategy', { strategy: String(strategy) }), undefined, { path: candidate.path })
     }
   }
 
@@ -149,7 +150,7 @@ export class ConflictResolver {
 
   private assertKnownStrategy(strategy: ConflictResolutionStrategy): void {
     if (!KNOWN_STRATEGIES.includes(strategy as string)) {
-      throw new ValidationError(`未知的冲突解决策略: ${String(strategy)}`, undefined, { strategy })
+      throw new ValidationError(t('e.unknownStrategy', { strategy: String(strategy) }), undefined, { strategy })
     }
   }
 

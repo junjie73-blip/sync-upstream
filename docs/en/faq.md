@@ -35,9 +35,13 @@ Node ≥ 18.2, Git ≥ 2.25. The tool calls your local `git` directly, so your p
 
 ## Configuration
 
+### Where do I start writing a configuration file?
+
+Two ways. `sync-upstream init` asks only the few questions that decide the outcome of the sync (upstream URL, branch, target branch, sync directories, and so on) and writes the answers into a file small enough to read in one go; if the target file already exists you need `--force` to overwrite it, and under `--json` or `-y` the wizard refuses outright. For a complete default template use `-g, --generate-config`, with the format chosen by `-F, --config-format json|json5|yaml|toml`.
+
 ### Why did my configuration file not take effect?
 
-You now get an explicit error instead of a silent fallback: if the file given to `-C` does not exist (`配置文件不存在: <path>` — "config file not found"), is unreadable, has a syntax error, is empty, or has a non-object top level, the run aborts with the reason; a parse failure also lists the JSON / YAML / TOML errors separately. Without `-C`, 16 candidate file names are searched in a fixed order, and if none is found you get a warning that spells out the search scope.
+You now get an explicit error instead of a silent fallback: if the file given to `-C` does not exist, is unreadable, has a syntax error, is empty, or has a non-object top level, the run aborts and says why; a parse failure also lists the JSON / YAML / TOML errors separately. Without `-C`, 16 candidate file names are searched in a fixed order, and if none is found you get a warning that spells out the search scope.
 
 ### I wrote fields like `targetBranch` / `maxRetries` — does the tool understand them?
 
@@ -51,9 +55,11 @@ That key belongs to neither a canonical field nor an alias, so it is most likely
 
 It is not only one — validation collects every problem and prints them at once (listed line by line after `配置校验失败:` — "configuration validation failed:"). After you fix them, the next run may reveal the remaining problems, but those belong to a later stage.
 
-### Where did the cache / LFS options go?
+### Where did the cache options go, and is LFS still configurable?
 
-The cache layer and the LFS-specific configuration were removed in the rewrite: sync decisions come straight from git's comparison, so caching brings no benefit any more, and large files are transferred by git itself — LFS only needs `.gitattributes` in the repository. Writing keys such as `cacheConfig` now only produces a deprecation warning.
+The cache layer is gone: the incremental decision now uses the content hashes git already records, and the state file is itself the evidence, so a separate cache layer brings no benefit any more. Keys such as `cache`, `cacheConfig`, and `adaptiveConcurrency` do not fail silently either — you get a one-time warning that they are `已废弃并被忽略` ("deprecated and ignored") plus an explanation of what decides things now (concurrency comes only from `concurrencyLimit`).
+
+LFS has its own configuration again, but not under the old name: `fetchConfig.lfs` takes `pointer` (the default, sync the pointer text only), `materialize` (fetch the real content with git-lfs after writing the pointer, which needs git-lfs installed locally and a reachable upstream LFS server), or `off` (no detection at all). Large-file transfer itself is still git's job, driven by `.gitattributes` in the repository. The same section also holds `filter` (partial fetch) and `depth` — see [fetchConfig in the configuration reference](/en/reference/configuration#fetchconfig).
 
 ## Usage
 
@@ -84,15 +90,17 @@ The second one is not an error; it happens when you sync the same content twice.
 
 ### Upstream changed 100 files but I only synced 90
 
-Look at the skipped-summary line at the end of the plan (`跳过 … 条`, "skipped … entries"): `被忽略规则排除` (excluded by an ignore rule), `文件类型不在白名单` (file type not in the allow list), `已是最新` (already up to date — incremental mode), `不在同步目录内` (outside the sync directories). Submodule pointers do not participate in syncing either. To find out why a particular file is ignored, check the root `.gitignore`, `.syncignore`, and any nested `.gitignore` inside the sync directories.
+Start with the `跳过 … 条` ("skipped … entries") summary at the end of the plan — every entry has a name: `被忽略规则排除` (excluded by an ignore rule), `文件类型不在白名单` (file type not in the allow list), `不在同步目录内` (outside the sync directories), `已是最新` (already up to date — incremental mode), `子模块（gitlink）无法按文件同步` (a submodule pointer cannot be synced file by file), `上游删除但被删除策略保留` (deleted by upstream but kept by the delete policy), `本地 core.symlinks=false，符号链接未写入` (`core.symlinks=false` locally, so the symlink was not written). To get the verdict for one **specific file**, do not guess: `sync-upstream why <path>` answers from the very same comparison the real plan used, and there are only five conclusions — `会同步` (will be synced), `需要冲突处理` (needs conflict handling), `不会同步` (will not be synced, naming the ignore rule that matched and the file it came from), `已与上游一致` (already matches upstream), `未找到该文件` (file not found). Add `--fetch` to contact upstream first, add `--json` for machine reading. For the overall picture run `sync-upstream status` (skip reasons grouped by count), and to check whether the environment is usable run `sync-upstream doctor`.
 
 ### Upstream moved a file — will the old path stay behind?
 
-No. When upstream moves a file (a rename with unchanged content), both the deleted old path and the added new path are recorded in the same commit, so no stale path is left behind.
+Not by default. Rename detection is on (`renameDetection: true`, with the similarity bar at `renameThreshold: 60`, i.e. git's `--find-renames`), so the old path and the new path land in the same commit as one rename, and the preview shows them as `>` with the similarity percentage; no stale path is left behind.
+
+Rename detection is switched off, with a warning, in these cases: `--no-renames` explicitly disables it, `deletePolicy: 'keep'`, a gray release is in progress, or `fetchConfig.depth` asks for a shallow fetch. Then the move is treated as two entries, "deleted upstream" plus "added upstream": the new path syncs as usual, and whether the old path disappears depends on the delete policy — `mirror` (the default) deletes it, `keep` preserves it and records it as `上游删除但被删除策略保留` ("deleted by upstream but kept by the delete policy"), and `ask` asks you about it one by one after printing the plan. See [delete and rename handling in the configuration reference](/en/reference/configuration#deletion-and-renames).
 
 ### Can I delete `.sync-state.json`?
 
-Yes — it is equivalent to a disposable incremental cache; after deleting it, the next full comparison is enough. You can also just run `--force` and ignore it. When you switch upstream repository or upstream branch, the file is rebuilt automatically. For its location and cleanup advice see [Runtime files and cleanup](/en/reference/configuration#runtime-files-and-cleanup).
+Yes — it is equivalent to a disposable incremental cache: after deleting it the next comparison is a full one (with the default `forceOverwrite: true` the file is never used to skip files anyway; only `--incremental` / `"forceOverwrite": false` relies on it). When you switch upstream repository or upstream branch, the file is rebuilt automatically. The only real cost is that the file also carries the most recent sync commits (up to 50 entries), so deleting it leaves `sync-upstream history` with nothing to show and `-uo` with nothing to undo — keep it if you want to stay able to roll back. Its location and cleanup advice are in [runtime files and cleanup](/en/reference/configuration#runtime-files-and-cleanup).
 
 ### How do I sync only some files inside a directory?
 
@@ -101,6 +109,22 @@ Yes — it is equivalent to a disposable incremental cache; after deleting it, t
 ### Will it commit my uncommitted changes along the way?
 
 No. The commit contains only the paths this sync actually applied. If there are uncommitted local changes inside a sync directory, they are listed as local changes and may be classified as conflicts, but they are never committed as a side effect.
+
+### Can I run two syncs at the same time?
+
+Not in parallel, but they cannot trample each other either: there is one lock, `.git/sync-upstream.lock` under the repository root, and the second process — with the default `lockWaitMs: 0` — fails immediately with exit code `5`, naming the holder's pid, task, and start time. To make the second one queue instead, set `lockWaitMs` or `--lock-wait <ms>`; webhook daemon mode relies on this very lock to serialise deliveries. A leftover lock is taken over automatically: immediately when the holding process has exited, and only after 30 minutes when the process is still alive but the lock is that old (which covers reused pids and separate pid spaces across machines). When in doubt run `sync-upstream doctor`, which reports either `仓库锁被占用` ("the repository lock is held") or `仓库锁空闲` ("the repository lock is free").
+
+### What if I need to follow several upstreams at once?
+
+Use `upstreams: [{ repo, branch, dirs, message }]`, i.e. fan-in: each upstream gets its own fetch remote (`sync-upstream`, `sync-upstream-2`…), its own incremental state file, and its own sync commit, and where directories overlap the later array entry overrides the earlier one. Repeating `-r` / `-b` on the command line is the shorthand for the same thing. Fields you leave out inherit the top-level configuration, but as soon as this list exists it replaces the top-level `upstreamRepo` / `upstreamBranch`. Limits: multiple upstreams and gray release are mutually exclusive (`-gr` / `-fr` / `-ro` fail outright), and the per-source state file names embed the ref and a hash, so they are not on the built-in ignore list — add `.sync-state-*.json` to `.gitignore`. See [upstreams in the configuration reference](/en/reference/configuration#multiple-upstream-sources).
+
+### The upstream repository is huge — fetching is slow and fills the disk
+
+What gets fetched is decided by `fetchConfig`: `filter: 'blob'` uses a partial fetch and does not download file content objects, `filter: 'tree'` also fetches tree objects on demand, `depth: n` takes only the last n commits (this makes your local repository shallow and switches rename detection off), `tags` leaves tags out by default, and when upstream uses Git LFS `lfs` takes `pointer` (sync the pointer text only, the default) / `materialize` (fetch the real content afterwards with git-lfs, which needs it installed locally and a reachable LFS server) / `off` (no detection at all). The matching flags are `--fetch-filter` / `--fetch-depth` / `--fetch-tags` / `--lfs`. See [fetchConfig in the configuration reference](/en/reference/configuration#fetchconfig).
+
+### Can a sync commit be undone?
+
+Yes, in two steps. `sync-upstream history` lists the recent syncs recorded in the state file (10 by default, adjusted with `--limit`, and `--json` for machine reading); `sync-upstream -uo` (`--undo`) undoes the most recently recorded sync by creating a new revert commit with `git revert`, so history is not rewritten and a branch that is already pushed stays safe to walk back. It only acts while that recorded commit is still HEAD; if you have stacked your own commits on top, it just prints `请手工执行 git revert <commit>` ("please run the revert on that commit by hand") rather than guessing your intent. After a successful undo it forgets those paths, so the next sync compares them again instead of being fooled by the incremental state. Note that PR mode does not write incremental state, so it also has nothing recorded to undo.
 
 ## Conflicts
 
@@ -127,7 +151,7 @@ Older versions could hit this (nothing was selected yet the run continued with a
 
 ### What do `--full-release` and `--rollback` depend on?
 
-On `.sync-gray.json` in the repository root. Do not delete it while a gray release is in progress; after a successful `--full-release` the state is cleaned up. `--rollback` also requires `grayReleaseConfig` to be enabled, otherwise it reports `--rollback 需要同时启用 grayReleaseConfig` ("--rollback requires grayReleaseConfig to be enabled as well").
+On `.sync-gray.json` in the repository root. Do not delete it while a gray release is in progress; after a successful `--full-release` the state is cleaned up. `--rollback` also requires `grayReleaseConfig` to be enabled, otherwise it reports `--rollback 需要同时启用 grayReleaseConfig` ("--rollback requires grayReleaseConfig to be enabled as well"). Multiple upstreams (fan-in via `upstreams`) and gray release are mutually exclusive: with `upstreams` present, `-gr` / `-fr` / `-ro` fail outright, so configure one upstream at a time when you need a gray release.
 
 ### Does a failing validation script roll back automatically?
 
@@ -139,25 +163,32 @@ Not by default. Automatic rollback happens only when `grayReleaseConfig.rollback
 
 Three sources: the platform cannot be identified (no `x-github-event` / `x-gitea-event` / `x-gitlab-event`|`x-gitlab-token` / `x-event-key`, and `supportedPlatforms` lists more than one platform), the signature is missing or malformed, or the signature does not match. An empty secret means **every request is rejected** — that is deliberate.
 
-### 403 / 429 / 413
+### 403 / 413 / 429 / 503 / 405 / 404
 
-`403` the IP is not in `securityConfig.ipWhitelist`; `429` (or the `statusCode` you configured) means the request exceeded the rate limit; `413` the body is larger than 1 MiB.
+- `403`: the source IP is not in `webhookConfig.securityConfig.ipWhitelist`
+- `413`: the request body exceeds the limit, 1 MiB by default, adjustable through `webhookConfig.maxBodyBytes` (1024 bytes at minimum)
+- `429`: the rate limit was exceeded (the status code itself can be rewritten by `webhookConfig.securityConfig.rateLimit.statusCode`)
+- `503`: the background sync queue is full (`webhookConfig.maxQueue`, 8 by default) or the service is shutting down. This is the redelivery signal for the platform, not a configuration error
+- `405`: a method other than POST
+- `404`: the path is neither `webhookConfig.path` nor the health endpoint (`/healthz` by default; `healthPath: false` turns it off)
 
 ### 200, but no sync was triggered
 
-The response body carries a `reason`: `非触发分支: xxx` ("non-triggering branch: xxx") or `事件不在允许列表: xxx` ("event not in the allow list: xxx"), or the event filter rules simply did not match. Branch comparison uses the short name with `refs/heads/` stripped. The order of the three filtering stages is in [Event filtering](/en/guide/webhook#event-filtering).
+The response body carries a `reason`: `非触发分支: xxx` ("non-triggering branch: xxx"), `事件不在允许列表: xxx` ("event not in the allow list: xxx"), the event filter rules simply did not match, or `重复投递: xxx` ("duplicate delivery: xxx") — when the provider redelivers the same delivery id, the second attempt is only acknowledged, not synced again (`deduplicate` is on by default and can be turned off). Branch comparison uses the short name with `refs/heads/` stripped. The order of the three filtering stages is in [Event filtering](/en/guide/webhook#event-filtering).
 
 ### Does a failed sync take the service down?
 
-No. The service answers `202 { accepted: true }` first, runs the sync in the background, and a failure only writes to the log.
-
-### Can the secret be read from an environment variable?
-
-No — the tool **does not read environment variables at all**. `webhookConfig.secret` must be a value in the configuration, or your CI/shell must expand it into `--webhook-secret "$SYNC_WEBHOOK_SECRET"`. Make sure a configuration file committed to the repository contains no real secret.
+No. The service answers `202 { accepted: true }` first, runs the sync in the background, and a failure only writes to the log. When `webhookConfig.deliveryLog` is set, a failure also appends a JSONL record whose `decision` is `failed` to the delivery audit, so you can still read it after the process exits; `sync-upstream doctor` prints the most recent entry so you can see that the service really is receiving deliveries.
 
 ### There is a reverse proxy in front — what do the IP allow list and rate limit use?
 
-The first hop of `x-forwarded-for` (the connection's remote address when that header is absent). That header is client-controllable, so exposing the service directly to the public internet lets it be forged — treat the allow list as defence in depth only, and your front proxy must overwrite this header.
+By default only the **remote address of the connection** is used — the hop in front of the server, which is your proxy's own IP. The first hop of `x-forwarded-for` is taken into account only after you explicitly set `webhookConfig.trustProxy: true`, because that header is client-controllable and can be forged when the service is exposed to the public internet directly. So the correct setup is: keep the default `host: 127.0.0.1` so only the local proxy can reach it, have the proxy overwrite `x-forwarded-for`, and only then turn `trustProxy` on; treat the allow list as defence in depth, never as the only gate. `sync-upstream doctor` flags these combinations: listening publicly without an `ipWhitelist` (warning), `trustProxy=true` (a reminder that it now takes part in the allow-list and rate-limit decisions), and a non-loopback address without `tlsCert`/`tlsKey` (warning).
+
+### Can the secret be read from an environment variable?
+
+No — credentials are **never read from environment variables**: `webhookConfig.secret` is either a value in the configuration, or your CI/shell expands it into `--webhook-secret "$SYNC_WEBHOOK_SECRET"`. Make sure a configuration file committed to the repository contains no real secret.
+
+The tool does read these non-sensitive environment variables, which are behaviour switches only and carry no credentials: `SYNC_UPSTREAM_LANG` (together with `LC_ALL` / `LANG` / `LANGUAGE` it decides the output language, equivalent to `--lang`), `GITHUB_STEP_SUMMARY` (when it exists the result summary is appended to that file), and `SYNC_UPSTREAM_PR_CREATE=0` (turns off automatic PR creation in PR mode).
 
 ## Troubleshooting
 
@@ -170,27 +201,31 @@ The first hop of `x-forwarded-for` (the connection's remote address when that he
 | `目标分支 x 既不在本地也不在 origin，请先创建后重试` ("target branch x exists neither locally nor on origin, create it and retry") | Preview mode will not create the branch for you — verify the branch name first |
 | `认证失败，请检查仓库权限或 --auth 配置` ("authentication failed, check repository permissions or the --auth configuration") | Check the token scope / private key; for a passphrase-protected key, add it to ssh-agent first |
 | `工作区存在未提交改动，git 拒绝了本次操作` ("uncommitted changes in the working tree, git rejected this operation") | Commit or stash your local changes first (conflicted files in particular) |
+| `仓库正被另一次同步占用（pid …，任务 …，开始于 …）。等待 Nms 后放弃；确认没有其它进程后可删除 … 强制解锁` ("the repository is busy with another sync (pid …, task …, started …); giving up after Nms; once you have confirmed no other process is running you can delete … to force-unlock") | Only one sync per repository at a time. Either wait for it to finish, or queue with `--lock-wait <ms>` / `lockWaitMs`; a lock whose holder has exited is taken over automatically, and you delete `.git/sync-upstream.lock` by hand only when the process is still alive and the file is genuinely a leftover. `sync-upstream doctor` tells you who holds it |
 | `推送到 origin/xxx 失败` ("push to origin/xxx failed") | The commit is already local; after checking permissions and branch protection you can `git push` separately |
 
 ### What do the exit codes mean?
 
-`0` success (including "no changes", a preview run, and cancelling with `Ctrl+C` in an interactive prompt) · `1` unexpected error, or some files failed to apply · `2` configuration/validation failure or an unknown command-line flag · `3` git operation failure · `4` corresponds to user cancellation and is a **reserved code**: the cancel path currently exits with `0`, so scripts cannot observe 4. The classification is in [Exit codes](/en/guide/automation#exit-codes).
+`0` success (including "no changes", a preview run, and cancelling with `Ctrl+C` during a sync) · `1` unexpected error, or some files failed to apply · `2` configuration/validation failure or an unknown command-line flag · `3` git operation failure · `4` user cancellation (today only cancelling inside `sync-upstream init` returns it; cancelling the sync flow still exits `0`) · `5` the repository is busy with another sync. The classification is in [Exit codes](/en/guide/automation#exit-codes).
 
 ### How do I see detailed logs?
 
 ```bash
-sync-upstream -V    # verbose level + full change list
-sync-upstream -s    # error output only
+sync-upstream -V          # verbose level + full change list
+sync-upstream --debug     # one level lower, including per-file conflict decisions
+sync-upstream -s          # error output only
 ```
 
-`-V` sets the level to verbose: plans are no longer truncated to 40 entries and verbose messages are let through. It **does not include debug** — today the only debug output is the per-file `冲突已解决: 路径 → 动作` ("conflict resolved: path → action"), and no command-line switch can reach that level; it is only reachable when the tool is used as a library. When `-V` and `-s` are both given, `-V` wins. Logs go to the console only; the tool writes no log file. See [Logging](/en/guide/automation#logging).
+`-V` sets the level to verbose: plans are no longer truncated to 40 entries and verbose messages are let through; `--debug` goes finer still and is a command-line switch only — there is no configuration key for it, so a config file can never open it by accident. `-s` has the highest priority, `-V` next.
+
+To keep evidence on disk: `--log-file <path>` or `logConfig.file` writes the log to a file as well, tuned by `--log-level` (default `info`; set `debug` to capture debug lines), `--log-json` (one JSON object per line), `--log-max` (5 MiB by default), and `--log-keep` (5 rotated files by default). Lines written to the file first have their colour codes stripped, then account/password parts of URLs and values such as `token=` / `secret=` / `Bearer` are redacted. The console level and the file level are independent of each other. See [Logging](/en/guide/automation#logging) and [logConfig in the configuration reference](/en/reference/configuration#logconfig).
 
 ### I want a clean restart after something went wrong
 
 1. `git status` to inspect the working tree (files with conflict markers may still need your attention after the tool committed)
 2. `git log -1 --stat` to see exactly which paths that sync commit carried
-3. To undo: `git reset --hard HEAD~1` (make sure you understand what you are discarding first); for a gray release prefer `sync-upstream -gr --rollback`
-4. Optional: delete `.sync-state.json` and re-run with `--force`
+3. To undo: prefer `sync-upstream -uo` — it creates a revert commit, does not rewrite history, and stays safe even when the branch is pushed; use `git reset --hard HEAD~1` only when you have confirmed that this sync commit is still only local. For a gray release use `sync-upstream -gr --rollback`
+4. Optional: delete `.sync-state.json` and re-run (the next comparison is a full one anyway), at the cost of losing the sync records that `history` / `-uo` depend on
 
 ### Will it touch my `origin`?
 

@@ -1,4 +1,5 @@
 import { red, yellow } from 'picocolors'
+import { t } from './i18n'
 import { logger } from './logger'
 
 export enum ErrorCode {
@@ -14,6 +15,7 @@ export enum ErrorCode {
   TIMEOUT = 'TIMEOUT_ERROR',
   SYNC_PROCESS = 'SYNC_PROCESS_ERROR',
   USER_CANCEL = 'USER_CANCEL',
+  LOCK = 'LOCK_ERROR',
 }
 
 export type ErrorSeverity = 'info' | 'warning' | 'error' | 'critical'
@@ -37,7 +39,7 @@ export abstract class SyncError extends Error {
   describe(): string {
     const parts = [this.message]
     if (this.originalError?.message)
-      parts.push(`原始错误: ${this.originalError.message}`)
+      parts.push(t('e.originalError', { message: this.originalError.message }))
     if (this.context && Object.keys(this.context).length > 0)
       parts.push(JSON.stringify(this.context))
     return parts.join('\n')
@@ -104,9 +106,15 @@ export class UserCancelError extends SyncError {
   readonly code = ErrorCode.USER_CANCEL
   override readonly severity: ErrorSeverity = 'info'
 
-  constructor(message = '用户取消了操作', context?: Record<string, unknown>) {
+  constructor(message = t('e.userCancelled'), context?: Record<string, unknown>) {
     super(message, undefined, context)
   }
+}
+
+/** Another sync holds this repository's lock, or the lock could not be written. */
+export class LockError extends SyncError {
+  readonly code = ErrorCode.LOCK
+  override readonly severity: ErrorSeverity = 'warning'
 }
 
 export function isSyncError(error: unknown): error is SyncError {
@@ -119,7 +127,7 @@ export function toError(value: unknown): Error {
   return new Error(String(value))
 }
 
-/** Exit code per failure class: 1 unexpected, 2 config/validation, 3 git, 4 user cancelled. */
+/** Exit code per failure class: 1 unexpected, 2 config/validation, 3 git, 4 user cancelled, 5 locked. */
 export function exitCodeFor(error: unknown): number {
   if (error instanceof UserCancelError)
     return 4
@@ -127,9 +135,11 @@ export function exitCodeFor(error: unknown): number {
     return 2
   if (error instanceof GitError)
     return 3
+  if (error instanceof LockError)
+    return 5
   return 1
 }
 
 export function formatUnknownError(error: unknown): string {
-  return red(`未预期的错误: ${yellow(toError(error).message)}`)
+  return red(t('e.unexpected', { message: yellow(toError(error).message) }))
 }

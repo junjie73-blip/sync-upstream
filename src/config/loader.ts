@@ -1,9 +1,11 @@
 import type { RawSyncConfig, SyncConfig } from '../domain'
 import type { ConfigFormat } from './parse'
+import type { ResolveConfigOptions } from './resolve'
 import path from 'node:path'
 import process from 'node:process'
 import fs from 'fs-extra'
 import { ConfigError, ValidationError } from '../errors'
+import { t } from '../i18n'
 import { CONFIG_FILE_NAMES, DEFAULT_CONFIG } from './defaults'
 import { mergeConfigLayers } from './merge'
 import { normalizeConfigKeys } from './normalize'
@@ -45,10 +47,10 @@ export async function readConfigFile(filePath: string, cwd = process.cwd()): Pro
     exists = await fs.pathExists(absolute)
   }
   catch (error) {
-    throw new ConfigError(`无法访问配置文件路径 ${absolute}`, error as Error, { cwd })
+    throw new ConfigError(t('c.configAccessFailed', { path: absolute }), error as Error, { cwd })
   }
   if (!exists) {
-    throw new ConfigError(`配置文件不存在: ${absolute}`, undefined, { cwd })
+    throw new ConfigError(t('c.configMissing', { path: absolute }), undefined, { cwd })
   }
 
   let content: string
@@ -59,15 +61,15 @@ export async function readConfigFile(filePath: string, cwd = process.cwd()): Pro
     const code = (error as NodeJS.ErrnoException).code
     throw new ConfigError(
       code === 'EACCES' || code === 'EPERM'
-        ? `没有读取配置文件的权限: ${absolute}`
-        : `读取配置文件失败: ${absolute}`,
+        ? t('c.configNoPermission', { path: absolute })
+        : t('c.configReadFailed', { path: absolute }),
       error as Error,
       { code },
     )
   }
 
   if (content.trim() === '') {
-    throw new ConfigError(`配置文件为空: ${absolute}`)
+    throw new ConfigError(t('c.configEmpty', { path: absolute }))
   }
 
   return parseConfigContent(content, path.basename(absolute))
@@ -83,7 +85,7 @@ export interface LoadConfigOptions {
 function buildLayer(raw: Record<string, unknown>): { layer: RawSyncConfig, config: SyncConfig, warnings: string[] } {
   const { value, warnings, errors } = normalizeConfigKeys(raw)
   if (errors.length > 0) {
-    throw new ValidationError(`配置项类型错误:\n  - ${errors.join('\n  - ')}`)
+    throw new ValidationError(`${t('v.typeErrors')}\n  - ${errors.join('\n  - ')}`)
   }
   return {
     layer: value,
@@ -104,7 +106,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Loade
   const found = await discoverConfigFile(baseDir)
   if (!found) {
     const built = buildLayer({})
-    built.warnings.push(`未在 ${baseDir} 找到配置文件（已查找: ${CONFIG_FILE_NAMES.join(', ')}），使用默认值`)
+    built.warnings.push(t('c.noConfigFound', { dir: baseDir, names: CONFIG_FILE_NAMES.join(', ') }))
     return { ...built, source: null }
   }
 
@@ -115,9 +117,12 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Loade
  * Layer sources by precedence: later wins. Nested objects merge key by key, so a CLI
  * `--retry-delay` cannot wipe out the `retryConfig.maxRetries` from the config file.
  */
-export function buildConfig(layers: Array<Record<string, unknown> | undefined>): ReturnType<typeof resolveConfig> {
+export function buildConfig(
+  layers: Array<Record<string, unknown> | undefined>,
+  options: ResolveConfigOptions = {},
+): ReturnType<typeof resolveConfig> {
   const merged = mergeConfigLayers<Record<string, unknown>>({}, ...layers.filter(Boolean) as Array<Record<string, unknown>>)
-  return resolveConfig(merged)
+  return resolveConfig(merged, options)
 }
 
 export async function writeConfigFile(filePath: string, config: unknown, format: ConfigFormat = 'json'): Promise<string> {

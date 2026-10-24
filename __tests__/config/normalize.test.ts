@@ -72,6 +72,24 @@ describe('normalizeConfigKeys', () => {
     expect(value.grayReleaseConfig).toEqual(gray)
   })
 
+  it('别名写进嵌套对象时，不改调用方传进来的那个对象', () => {
+    const webhookConfig = { enable: true, port: 8080 }
+    const { value } = normalizeConfigKeys({ webhookConfig, webhookLog: 'logs/d.jsonl', webhookQueue: 3 })
+
+    // 非别名的键是按引用搬进 output 的，所以别名必须复制一层再写：否则调用方的对象凭空多出两个
+    // 字段，同一个配置对象第二次解析时看到的已经不是它自己写的内容了。
+    expect(webhookConfig).toEqual({ enable: true, port: 8080 })
+    expect(value.webhookConfig).toEqual({ enable: true, port: 8080, deliveryLog: 'logs/d.jsonl', maxQueue: 3 })
+  })
+
+  it('两个别名落到同一个嵌套对象时各自保留', () => {
+    const fetchConfig = { lfs: 'off' }
+
+    expect(normalizeConfigKeys({ fetchConfig, fetchDepth: 50, fetchTags: true }).value.fetchConfig)
+      .toEqual({ lfs: 'off', depth: 50, tags: true })
+    expect(fetchConfig).toEqual({ lfs: 'off' })
+  })
+
   it('类型错误的别名收集为错误而不是抛裸 Error', () => {
     const result = normalizeConfigKeys({ maxParallelFiles: 'many', push: 'perhaps' })
     expect(result.errors).toHaveLength(2)

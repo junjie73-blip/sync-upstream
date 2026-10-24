@@ -3,12 +3,13 @@ import path from 'node:path'
 import process from 'node:process'
 import { AuthType } from '../domain'
 import { AuthenticationError, GitError, TimeoutError, toError } from '../errors'
+import { t } from '../i18n'
 
 /** scp-style address (`git@host:org/repo.git`) is not a URL and needs rewriting first. */
 export function toClonableUrl(rawUrl: string, auth?: AuthConfig): string {
   const trimmed = rawUrl.trim()
   if (trimmed === '')
-    throw new AuthenticationError('仓库 URL 为空')
+    throw new AuthenticationError(t('e.repoUrlEmpty'))
 
   const withAuth = (base: string, username: string, secret: string): string => {
     const url = new URL(base)
@@ -30,20 +31,24 @@ export function toClonableUrl(rawUrl: string, auth?: AuthConfig): string {
   const secret = auth.type === AuthType.PAT ? auth.token : auth.password
   const username = auth.type === AuthType.PAT ? 'git' : auth.username
   if (!username || !secret) {
-    throw new AuthenticationError(`认证类型 ${auth.type} 需要同时提供用户名/令牌与密码`, undefined, { type: auth.type })
+    throw new AuthenticationError(t('e.authNeedsPair', { type: auth.type }), undefined, { type: auth.type })
   }
 
   try {
     return withAuth(resolved, username, secret)
   }
   catch (error) {
-    throw new AuthenticationError(`无法为仓库地址附加认证信息: ${redacted(trimmed)}`, toError(error))
+    throw new AuthenticationError(t('e.authEmbedFailed', { url: redacted(trimmed) }), toError(error))
   }
 }
 
-/** Never let a credential-bearing URL reach logs or error messages. */
+/**
+ * Never let a credential-bearing URL reach logs or error messages. Both spellings occur in
+ * the wild: `https://user:token@host` and `https://<token>@host` (GitHub PATs, GitLab
+ * `oauth2@`, Bitbucket app passwords), so everything before the `@` goes.
+ */
 export function redacted(url: string): string {
-  return url.replace(/\/\/([^/@:]+):([^@/]+)@/g, '//***@')
+  return url.replace(/\/\/[^/@\s]+@/g, '//***@')
 }
 
 export function parseRepoUrl(rawUrl: string): URL | null {

@@ -1,4 +1,5 @@
 import type { ConflictDecision, RepoPath, SyncConfig } from '../../src/domain'
+import type { SyncStateIdentity } from '../../src/pipeline/sync-state'
 import type { Fixture } from '../helpers/repo'
 import path from 'node:path'
 import fs from 'fs-extra'
@@ -74,6 +75,11 @@ function baseConfig(overrides: Record<string, unknown> = {}): SyncConfig {
     ...overrides,
   })
   return resolved
+}
+
+/** 增量状态按 (上游仓库, 上游分支, 目标分支) 记账，缺一项就换不到对方的记录。 */
+function identity(overrides: Partial<SyncStateIdentity> = {}): SyncStateIdentity {
+  return { upstreamRepo: fixture.root, upstreamBranch: 'upstream', companyBranch: 'company', ...overrides }
 }
 
 async function ignoreFor(cfg: SyncConfig): Promise<IgnoreMatcher> {
@@ -276,14 +282,14 @@ describe('端到端同步：冲突处理', () => {
 describe('端到端同步：增量状态（问题④）', () => {
   it('forceOverwrite=false 时第二次运行按 blob oid 跳过已同步文件', async () => {
     const statePath = path.join(fixture.root, '.sync-state.json')
-    const state = await SyncState.load(statePath, fixture.root, 'upstream')
+    const state = await SyncState.load(statePath, identity())
 
     const first = await runSync(new Map(), { forceOverwrite: false }, state)
     expect(first.commit.created).toBe(true)
     state.record(first.result.applied)
     await state.save()
 
-    const reloaded = await SyncState.load(statePath, fixture.root, 'upstream')
+    const reloaded = await SyncState.load(statePath, identity())
     expect(reloaded.size).toBeGreaterThan(0)
 
     const second = await makePlan({ forceOverwrite: false }, reloaded)
@@ -293,7 +299,7 @@ describe('端到端同步：增量状态（问题④）', () => {
 
   it('上游新增提交后，增量同步只搬运新文件', async () => {
     const statePath = path.join(fixture.root, '.sync-state.json')
-    const state = await SyncState.load(statePath, fixture.root, 'upstream')
+    const state = await SyncState.load(statePath, identity())
     const first = await runSync(new Map(), { forceOverwrite: false }, state)
     state.record(first.result.applied)
     await state.save()
@@ -303,24 +309,25 @@ describe('端到端同步：增量状态（问题④）', () => {
     await fixture.commitAll('upstream adds c.ts')
     await fixture.gitRaw(['checkout', '-q', 'company'])
 
-    const reloaded = await SyncState.load(statePath, fixture.root, 'upstream')
+    const reloaded = await SyncState.load(statePath, identity())
     const plan = await makePlan({ forceOverwrite: false }, reloaded)
     expect(plan.changes.map(entry => entry.path)).toEqual(['src/config/c.ts'])
   })
 
   it('换仓库或换分支时旧状态失效；损坏的状态文件报可定位错误', async () => {
     const statePath = path.join(fixture.root, '.sync-state.json')
-    const state = await SyncState.load(statePath, fixture.root, 'upstream')
+    const state = await SyncState.load(statePath, identity())
     const first = await runSync(new Map(), { forceOverwrite: false }, state)
     state.record(first.result.applied)
     await state.save()
 
-    expect((await SyncState.load(statePath, 'https://example.com/other.git', 'upstream')).size).toBe(0)
-    expect((await SyncState.load(statePath, fixture.root, 'release')).size).toBe(0)
+    expect((await SyncState.load(statePath, identity({ upstreamRepo: 'https://example.com/other.git' }))).size).toBe(0)
+    expect((await SyncState.load(statePath, identity({ upstreamBranch: 'release' }))).size).toBe(0)
+    expect((await SyncState.load(statePath, identity({ companyBranch: 'company-beta' }))).size).toBe(0)
 
     const corrupt = path.join(fixture.root, 'broken-state.json')
     await fs.writeFile(corrupt, '{ not json', 'utf8')
-    await expect(SyncState.load(corrupt, fixture.root, 'upstream')).rejects.toThrow(/状态文件/)
+    await expect(SyncState.load(corrupt, identity())).rejects.toThrow(/状态文件/)
   })
 })
 

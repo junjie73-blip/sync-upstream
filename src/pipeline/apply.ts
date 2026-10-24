@@ -4,6 +4,7 @@ import type {
   ApplyResult,
   ChangeEntry,
   ConflictDecision,
+  RenamePair,
   RepoPath,
   SyncPlan,
 } from '../domain'
@@ -14,6 +15,8 @@ import { createLimit } from '../concurrency'
 import { ChangeKind, ConflictType } from '../domain'
 import { toError } from '../errors'
 import { joinRepoPath } from '../fsx/paths'
+import { t } from '../i18n'
+import { renameNeedsContent } from './renames'
 
 export interface ApplyContext {
   git: GitRepository
@@ -30,9 +33,16 @@ interface Classification {
   applied: AppliedChange[]
   toWrite: ChangeEntry[]
   toRemove: ChangeEntry[]
+  /** Upstream renamed these paths; `git mv` keeps history and any local edits. */
+  toMove: ChangeEntry[]
   /** Upstream file that currently is a local directory; the tree must go first. */
   toUnset: RepoPath[]
   merged: Array<{ path: RepoPath, content: string }>
+}
+
+/** The pair a RENAME entry carries, as the git layer wants it. */
+function pairOf(entry: ChangeEntry): RenamePair {
+  return { from: entry.fromPath as RepoPath, to: entry.path, similarity: entry.similarity ?? 100 }
 }
 
 function typeConflictPaths(plan: SyncPlan): Set<RepoPath> {
@@ -44,10 +54,24 @@ function typeConflictPaths(plan: SyncPlan): Set<RepoPath> {
   return paths
 }
 
+/**
+ * Deletions the operator was explicitly asked about: the file had local edits and a DELETE_MODIFY
+ * conflict was raised, so reaching the apply stage means "remove it anyway". Without `-f` here
+ * `git rm` refuses the whole batch and the file survives the decision that was just made.
+ */
+function overriddenDeletes(plan: SyncPlan): Set<RepoPath> {
+  const paths = new Set<RepoPath>()
+  for (const conflict of plan.conflicts) {
+    if (conflict.conflictType === ConflictType.DELETE_MODIFY)
+      paths.add(conflict.path)
+  }
+  return paths
+}
+
 function classify(context: ApplyContext): Classification {
   const { plan, decisions } = context
   const unshelved = typeConflictPaths(plan)
-  const result: Classification = { applied: [], toWrite: [], toRemove: [], toUnset: [], merged: [] }
+  const result: Classification = { applied: [], toWrite: [], toRemove: [], toMove: [], toUnset: [], merged: [] }
 
   for (const entry of plan.changes) {
     const decision = decisions.get(entry.path)
@@ -59,6 +83,17 @@ function classify(context: ApplyContext): Classification {
 
     if (entry.kind === ChangeKind.DELETE) {
       result.toRemove.push(entry)
+      continue
+    }
+
+    // A rename is one operation, not a delete plus an add: the old path goes, the new path
+    // holds the content, and both halves succeed or fail together.
+    if (entry.kind === ChangeKind.RENAME) {
+      if (unshelved.has(entry.path))
+        result.toUnset.push(entry.path)
+      result.toMove.push(entry)
+      if (decision?.action === 'write-merged' && decision.mergedContent !== undefined)
+        result.merged.push({ path: entry.path, content: decision.mergedContent })
       continue
     }
 
@@ -75,16 +110,35 @@ function classify(context: ApplyContext): Classification {
 
 /**
  * Apply a plan with git itself: `checkout <ref> -- <paths>` for adds and modifies
- * (binary safe and staged in one step), `git rm` for upstream deletions.
+ * (binary safe and staged in one step), `git mv` for upstream renames, `git rm` for deletions.
  */
 export async function applyChanges(context: ApplyContext): Promise<ApplyResult> {
-  const { git, repoRoot, upstreamRef } = context
+  const { git, repoRoot, upstreamRef, plan } = context
   const limit = createLimit(context.concurrencyLimit ?? 5)
-  const { applied, toWrite, toRemove, toUnset, merged } = classify(context)
+  const { applied, toWrite, toRemove, toMove, toUnset, merged } = classify(context)
 
   // A local directory blocking an upstream file makes plain `checkout` fail, so clear it first.
   if (toUnset.length > 0)
     await git.removeRecursive(toUnset)
+
+  await runBatch(
+    applied,
+    toMove,
+    async () => {
+      await git.renamePaths(toMove.filter(entry => entry.fromPath).map(pairOf))
+      const fills = toMove.filter(entry => renameNeedsContent(entry) && entry.fromPath).map(entry => entry.path)
+      if (fills.length > 0)
+        await git.checkoutPathsFromRef(upstreamRef, fills)
+    },
+    async (entry) => {
+      if (!entry.fromPath)
+        throw new Error(t('e.renameNoFrom', { path: entry.path }))
+      await git.renamePaths([pairOf(entry)])
+      if (renameNeedsContent(entry))
+        await git.checkoutPathsFromRef(upstreamRef, [entry.path])
+    },
+    limit,
+  )
 
   await runBatch(
     applied,
@@ -96,7 +150,12 @@ export async function applyChanges(context: ApplyContext): Promise<ApplyResult> 
 
   for (const item of merged) {
     const target = joinRepoPath(repoRoot, item.path)
-    const entry = toWrite.find(candidate => candidate.path === item.path)
+    // A merged rename lands on the new path, which only exists after the `git mv` above.
+    const entry = [...toWrite, ...toMove].find(candidate => candidate.path === item.path)
+    // Writing the merge result onto a path whose move failed would invent a half-applied rename.
+    const blocked = applied.some(change => change.status === 'failed' && change.entry.path === item.path)
+    if (blocked)
+      continue
     try {
       await fs.ensureDir(path.dirname(target))
       await fs.writeFile(target, item.content, 'utf8')
@@ -108,11 +167,26 @@ export async function applyChanges(context: ApplyContext): Promise<ApplyResult> 
     }
   }
 
+  // Plain upstream deletions go without `-f`: anything the tool did not plan to touch stays.
+  // The paths that raised a DELETE_MODIFY conflict are here because the operator chose to follow
+  // upstream anyway, and `git rm` must actually remove them instead of refusing the batch.
+  const overridden = overriddenDeletes(plan)
+  const plainDeletes = toRemove.filter(entry => !overridden.has(entry.path))
+  const forcedDeletes = toRemove.filter(entry => overridden.has(entry.path))
+
   await runBatch(
     applied,
-    toRemove,
-    () => git.removePaths(toRemove.map(entry => entry.path)),
+    plainDeletes,
+    () => git.removePaths(plainDeletes.map(entry => entry.path)),
     entry => git.removePaths([entry.path]),
+    limit,
+  )
+
+  await runBatch(
+    applied,
+    forcedDeletes,
+    () => git.removePaths(forcedDeletes.map(entry => entry.path), { force: true }),
+    entry => git.removePaths([entry.path], { force: true }),
     limit,
   )
 

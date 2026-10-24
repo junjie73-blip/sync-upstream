@@ -202,6 +202,32 @@ describe('buildConfig', () => {
     expect(config.retryConfig.initialDelay).toBe(5)
     expect(config.retryConfig.backoffFactor).toBe(DEFAULT_CONFIG.retryConfig.backoffFactor)
   })
+
+  it('严格模式对缺字段抛错，宽松模式把同样的问题原样交出来', () => {
+    const layers = [{ upstreamBranch: 'main', companyBranch: 'downstream' }]
+    expect(() => buildConfig(layers)).toThrow(ValidationError)
+
+    const { config, problems } = buildConfig(layers, { lenient: true })
+    expect(problems.join('\n')).toContain('upstreamRepo')
+    expect(problems.join('\n')).toContain('syncDirs')
+    // 没配同步目录不等于崩掉：诊断命令拿到的是一份能用的空配置。
+    expect(config.syncDirs).toEqual([])
+  })
+
+  it('宽松模式遇到类型错误的数组字段也不会崩', () => {
+    const { config, problems } = buildConfig(
+      [{ upstreamRepo: VALID.upstreamRepo, syncDirs: 'src/components', includeFileTypes: '.ts' }],
+      { lenient: true },
+    )
+    expect(problems.join('\n')).toContain('syncDirs')
+    expect(config.syncDirs).toEqual([])
+    expect(config.includeFileTypes).toEqual([])
+  })
+
+  it('配置本来就合法时，宽松模式的 problems 是空的', () => {
+    const { problems } = buildConfig([VALID], { lenient: true })
+    expect(problems).toEqual([])
+  })
 })
 
 describe('writeConfigFile / generateDefaultConfig', () => {

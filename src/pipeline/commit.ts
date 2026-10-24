@@ -1,6 +1,7 @@
 import type { ApplyResult, CommitResult, RepoPath, SyncPlan } from '../domain'
 import type { GitRepository } from '../git/repository'
 import { ChangeKind } from '../domain'
+import { logger } from '../logger'
 
 export interface CommitContext {
   git: GitRepository
@@ -18,6 +19,9 @@ function touchedPaths(plan: SyncPlan, result: ApplyResult): Set<RepoPath> {
   for (const entry of plan.changes) {
     if (entry.kind === ChangeKind.DELETE)
       touched.add(entry.path)
+    // The old half of a rename is staged as a deletion too, and `git mv` leaves no file there.
+    if (entry.kind === ChangeKind.RENAME && entry.fromPath)
+      touched.add(entry.fromPath)
   }
   return touched
 }
@@ -34,9 +38,9 @@ function touchedPaths(plan: SyncPlan, result: ApplyResult): Set<RepoPath> {
 export async function commitChanges(context: CommitContext): Promise<CommitResult> {
   const { git, message } = context
   const candidates = touchedPaths(context.plan, context.result)
+  const stagedAll = await git.stagedPaths()
 
-  const staged = (await git.stagedPaths()).filter(repoPath => candidates.has(repoPath))
-  if (staged.length === 0) {
+  if (stagedAll.filter(repoPath => candidates.has(repoPath)).length === 0) {
     return {
       created: false,
       stagedCount: 0,
@@ -47,7 +51,15 @@ export async function commitChanges(context: CommitContext): Promise<CommitResul
   }
 
   const paths = [...candidates].sort()
-  const hash = await git.commit(message, paths)
+  // `git commit -- <paths>` is an `--only` commit: it re-reads those paths from the *working
+  // tree*, which on Windows (no exec bit, core.filemode=false) turns a staged 100755 back
+  // into 100644. So when nothing outside this run's scope is staged, commit the index as-is
+  // and keep the mode `git checkout <ref> -- <path>` put there.
+  const foreign = stagedAll.filter(repoPath => !candidates.has(repoPath))
+  if (foreign.length > 0) {
+    logger.warn(`暂存区里有 ${foreign.length} 个不属于本次同步的文件，只提交本次范围（在 Windows 上纯权限变化可能不被记录）`)
+  }
+  const hash = foreign.length === 0 ? await git.commit(message) : await git.commit(message, paths)
   return { created: true, hash, stagedCount: paths.length }
 }
 

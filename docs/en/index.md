@@ -82,7 +82,7 @@ sync-upstream -r https://github.com/vuejs/core.git \
 - Stuck: [FAQ](/en/faq) · [Exit codes and logging](/en/guide/automation#exit-codes)
 - Deep dives: [Conflict handling](/en/guide/conflicts) · [Gray release and rollback](/en/guide/gray-release) · [Webhook daemon](/en/guide/webhook) · [CI and automation](/en/guide/automation)
 - Look things up: [CLI reference](/en/reference/cli) · [Configuration reference](/en/reference/configuration) · [API reference](/en/reference/api)
-- The project: [Installation guide](/en/guide/installation) · [Configuration guide](/en/guide/configuration) · [Feature record](/en/features) · [Changelog](/en/changelog)
+- The project: [Installation guide](/en/guide/installation) · [Configuration guide](/en/guide/configuration) · [Feature record](/en/features) · [Planned for the next release](/en/roadmap) · [Changelog](/en/changelog)
 
 ## Prerequisites
 

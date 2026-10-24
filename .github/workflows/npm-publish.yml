@@ -3,7 +3,10 @@ name: Publish to npm
 on:
   push:
     tags:
-      - 'v*' # 仅当以 v1.2.3 格式推送 tag 时触发
+      - 'v*' # 仅当以 v1.2.3 / v0.3.0-beta.0 这样的格式推送 tag 时触发
+
+permissions:
+  contents: read
 
 jobs:
   publish:
@@ -19,7 +22,7 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9 # 或写 10.12.4 保持一致
+          version: 9
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -30,10 +33,38 @@ jobs:
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
 
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm run test:ci
+
       - name: Build package
         run: pnpm run build # 你的构建脚本
 
+      # 预发布版本（v0.3.0-beta.0 这种带 - 的 tag）不能占用 latest，
+      # 否则用户 `npm i sync-upstream` 会装到 beta。
+      - name: Resolve dist-tag
+        id: dist
+        run: |
+          tag='${{ github.ref_name }}'
+          version="$(node -p "require('./package.json').version")"
+          echo "version=$version"
+          case "$tag" in
+            v*) ;;
+            *) echo "unexpected tag: $tag"; exit 1 ;;
+          esac
+          if [ "v$version" != "$tag" ]; then
+            echo "tag $tag does not match package.json version v$version"
+            exit 1
+          fi
+          if echo "$version" | grep -q -- '-'; then
+            echo 'dist=next' >> "$GITHUB_OUTPUT"
+          else
+            echo 'dist=latest' >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish
-        run: pnpm publish --no-git-checks
+        run: pnpm publish --no-git-checks --tag ${{ steps.dist.outputs.dist }} --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

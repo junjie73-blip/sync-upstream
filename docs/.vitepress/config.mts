@@ -83,6 +83,7 @@ const zhTheme = {
         items: [
           { text: '更新日志', link: '/changelog' },
           { text: '功能记录', link: '/features' },
+          { text: '下一版计划', link: '/roadmap' },
           { text: '常见问题', link: '/faq' },
         ],
       },
@@ -137,6 +138,7 @@ const enTheme = {
         items: [
           { text: 'Changelog', link: '/en/changelog' },
           { text: 'Features', link: '/en/features' },
+          { text: 'Planned', link: '/en/roadmap' },
           { text: 'FAQ', link: '/en/faq' },
         ],
       },

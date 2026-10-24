@@ -5,6 +5,7 @@ import process from 'node:process'
 import fs from 'fs-extra'
 import { GrayReleaseStage } from '../domain'
 import { FsError, toError } from '../errors'
+import { t } from '../i18n'
 
 export const GRAY_STATE_FILE = '.sync-gray.json'
 
@@ -68,7 +69,7 @@ export class GrayState {
         data = await fs.readJson(filePath) as GrayStateData
       }
       catch (error) {
-        throw new FsError(`灰度状态文件无法读取: ${filePath}`, toError(error))
+        throw new FsError(t('e.grayStateRead', { file: filePath }), toError(error))
       }
     }
     // A state file from another repo/branch/strategy cannot describe this release.
@@ -152,7 +153,7 @@ export class GrayState {
       await fs.writeJson(this.filePath, this.data, { spaces: 2 })
     }
     catch (error) {
-      throw new FsError(`灰度状态文件无法写入: ${this.filePath}`, toError(error))
+      throw new FsError(t('e.grayStateWrite', { file: this.filePath }), toError(error))
     }
   }
 

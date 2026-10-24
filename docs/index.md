@@ -82,7 +82,7 @@ sync-upstream -r https://github.com/vuejs/core.git \
 - 卡住了：[常见问题](/faq) · [退出码与日志](/guide/automation#退出码)
 - 专项：[冲突处理](/guide/conflicts) · [灰度发布与回滚](/guide/gray-release) · [Webhook 守护模式](/guide/webhook) · [CI 与自动化](/guide/automation)
 - 逐项查：[命令行参考](/reference/cli) · [配置参考](/reference/configuration) · [API 参考](/reference/api)
-- 项目：[安装指南](/guide/installation) · [配置指南](/guide/configuration) · [功能记录](/features) · [更新日志](/changelog)
+- 项目：[安装指南](/guide/installation) · [配置指南](/guide/configuration) · [功能记录](/features) · [下一版计划](/roadmap) · [更新日志](/changelog)
 
 ## 运行前提
 

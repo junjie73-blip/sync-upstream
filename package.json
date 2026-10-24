@@ -35,16 +35,26 @@
     "dist",
     "package.json"
   ],
+  "engines": {
+    "node": ">=18.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "lint": "eslint . --ext .ts,.js",
     "build": "tsup",
     "dev": "tsup --watch",
     "lint:fix": "eslint . --ext .ts,.js --fix",
     "format": "prettier --write .",
+    "typecheck": "tsc --noEmit",
     "test": "jest",
+    "test:fast": "jest --coverage=false -w 1",
+    "test:ci": "jest --ci --maxWorkers=2",
+    "check": "pnpm run typecheck && pnpm run lint && pnpm run test",
     "test:watch": "jest --watch",
     "coverage": "jest --coverage",
-    "prepublishOnly": "pnpm run build",
+    "prepublishOnly": "pnpm run typecheck && pnpm run build",
     "release": "release-it",
     "release:major": "release-it --release-as major",
     "release:minor": "release-it --release-as minor",

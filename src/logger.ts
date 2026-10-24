@@ -1,10 +1,12 @@
 import type { ConsolaInstance } from 'consola'
+import type { LogConfig } from './domain/log'
 import path from 'node:path'
 import process from 'node:process'
 import { consola } from 'consola'
-import dayjs from 'dayjs'
-import fs from 'fs-extra'
 import { blue, bold, cyan, gray, green, magenta, red, yellow } from 'picocolors'
+import { DEFAULT_LOG_CONFIG } from './domain/log'
+import { LogFileSink } from './log/sink'
+
 // 定义日志级别
 export enum LogLevel {
   DEBUG = 'debug',
@@ -17,28 +19,21 @@ export enum LogLevel {
   TRACE = 'trace', // 详细追踪日志
 }
 
-// 日志配置接口
+/**
+ * Console knobs only. Where the lines also go is a `LogConfig` (see `configureLogging`), because a
+ * file needs a level, a format and a size ceiling the terminal does not care about.
+ */
 export interface LoggerConfig {
   level: LogLevel
-  logToFile: boolean
-  logFilePath: string
   showTimestamp: boolean
   showLevel: boolean
-  structedLogging: boolean
-  perfMetricsEnabled: boolean
-  traceEnabled: boolean
 }
 
 // 默认日志配置
 const DEFAULT_CONFIG: LoggerConfig = {
   level: LogLevel.INFO,
-  logToFile: false,
-  logFilePath: path.join(process.cwd(), 'sync-upstream.log'),
   showTimestamp: true,
   showLevel: true,
-  structedLogging: false,
-  perfMetricsEnabled: true,
-  traceEnabled: false,
 }
 
 export class Logger {
@@ -56,59 +51,55 @@ export class Logger {
     LogLevel.ERROR,
   ]
 
+  private sink: LogFileSink | null = null
+  /** A log file that cannot be written gets one console line, not one per log line. */
+  private sinkWarned = false
+
   constructor(config: Partial<LoggerConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config }
     this.consola = this.createConsola()
-
-    // 如果配置了日志文件，确保目录存在
-    if (this.config.logToFile) {
-      fs.ensureDirSync(path.dirname(this.config.logFilePath))
-    }
   }
 
   private rank(): number {
     return this.logLevels.indexOf(this.config.level)
   }
 
+  /**
+   * 控制台要不要打印这一行。落盘不受它约束：`--silent` 是不想看见输出，不是不想留下记录，否则一个
+   * 安静退出的守护进程和一个从没启动的守护进程在日志里长得一模一样。文件那一边由 sink 自己的等级过滤。
+   */
   private enabled(level: LogLevel): boolean {
     return this.logLevels.indexOf(level) >= this.rank()
   }
 
-  // 获取当前时间戳
-  private getTimestamp(): string {
-    return dayjs().format('YYYY-MM-DD HH:mm:ss')
+  /**
+   * Write every line to a rotated file as well. `null` — the default — means console only, which is
+   * what every release up to 0.2 did.
+   *
+   * The file is deliberately not filtered by the console level: `--silent` still has to leave a
+   * trail, otherwise a daemon that died quietly is indistinguishable from one that never started.
+   */
+  setFileSink(sink: LogFileSink | null): void {
+    this.sink = sink
+    this.sinkWarned = false
   }
 
-  // 记录到文件
-  private logToFile(level: LogLevel, message: string, context?: Record<string, any>): void {
-    if (!this.config.logToFile)
+  /** Absolute path of the log file, or `undefined` when logging to the console only. */
+  get fileSinkPath(): string | undefined {
+    return this.sink?.path
+  }
+
+  /**
+   * Hand a line to the sink. Colour and credentials are stripped inside it, so callers can pass
+   * whatever they just printed to the terminal.
+   */
+  private toFile(level: LogLevel | 'step', message: string, context?: Record<string, any>): void {
+    const failure = this.sink?.write({ level, message, at: new Date().toISOString(), ...(context ? { context } : {}) })
+    if (!failure || this.sinkWarned)
       return
-
-    const timestamp = this.getTimestamp()
-
-    if (this.config.structedLogging) {
-      // 结构化日志格式
-      const logEntry = {
-        timestamp,
-        level: level.toUpperCase(),
-        message,
-        context: context || {},
-      }
-      const logMessage = `${JSON.stringify(logEntry)}
-`
-      fs.appendFile(this.config.logFilePath, logMessage)
-        .catch(error => console.error('写入日志文件失败:', error))
-    }
-    else {
-      // 普通文本日志格式
-      const contextStr = context ? ` ${JSON.stringify(context)}` : ''
-      const logMessage = this.config.showLevel
-        ? `[${timestamp}] [${level.toUpperCase()}] ${message}${contextStr}\n`
-        : `[${timestamp}] ${message}${contextStr}\n`
-
-      fs.appendFile(this.config.logFilePath, logMessage)
-        .catch(error => console.error('写入日志文件失败:', error))
-    }
+    this.sinkWarned = true
+    // `process.stderr` on purpose: reporting a log-file failure through the logger recurses.
+    process.stderr.write(`${gray('[LOG]')} ${failure}\n`)
   }
 
   // 调试日志
@@ -116,35 +107,34 @@ export class Logger {
     if (this.enabled(LogLevel.DEBUG)) {
       const contextStr = context ? ` ${JSON.stringify(context)}` : ''
       this.consola.debug(blue(`[DEBUG] ${message}${contextStr}`))
-      this.logToFile(LogLevel.DEBUG, message, context)
     }
+    this.toFile(LogLevel.DEBUG, message, context)
   }
 
   // 详细日志
   verbose(message: string): void {
-    if (this.enabled(LogLevel.VERBOSE)) {
+    if (this.enabled(LogLevel.VERBOSE))
       this.consola.log(gray(`[VERBOSE] ${message}`))
-      this.logToFile(LogLevel.VERBOSE, message)
-    }
+    this.toFile(LogLevel.VERBOSE, message)
   }
 
   // 追踪日志
   trace(message: string, context?: Record<string, any>): void {
-    if (this.config.traceEnabled && this.enabled(LogLevel.TRACE)) {
+    if (this.enabled(LogLevel.TRACE)) {
       const contextStr = context ? ` ${JSON.stringify(context)}` : ''
-      this.consola.log(`[TRACE] ${message}${contextStr}`)
-      this.logToFile(LogLevel.TRACE, message, context)
+      this.consola.log(gray(`[TRACE] ${message}${contextStr}`))
     }
+    this.toFile(LogLevel.TRACE, message, context)
   }
 
   // 性能日志
   perf(operation: string, durationMs: number, context?: Record<string, any>): void {
-    if (this.config.perfMetricsEnabled && this.enabled(LogLevel.PERF)) {
-      const formattedDuration = durationMs.toFixed(2)
+    const message = `${operation} took ${durationMs.toFixed(2)}ms`
+    if (this.enabled(LogLevel.PERF)) {
       const contextStr = context ? ` ${JSON.stringify(context)}` : ''
-      this.consola.log(cyan(`[PERF] ${operation} took ${formattedDuration}ms${contextStr}`))
-      this.logToFile(LogLevel.PERF, `${operation} took ${formattedDuration}ms`, context)
+      this.consola.log(cyan(`[PERF] ${message}${contextStr}`))
     }
+    this.toFile(LogLevel.PERF, message, context)
   }
 
   // 设置日志级别：过滤只由 logLevels 顺序决定，consola 保持全放行
@@ -152,13 +142,17 @@ export class Logger {
     this.config.level = level
   }
 
+  getLevel(): LogLevel {
+    return this.config.level
+  }
+
   // 信息日志
   info(message: string, context?: Record<string, any>): void {
     if (this.enabled(LogLevel.INFO)) {
       const contextStr = context ? ` ${JSON.stringify(context)}` : ''
       this.consola.info(cyan(`[INFO] ${message}${contextStr}`))
-      this.logToFile(LogLevel.INFO, message, context)
     }
+    this.toFile(LogLevel.INFO, message, context)
   }
 
   // 成功日志
@@ -166,8 +160,8 @@ export class Logger {
     if (this.enabled(LogLevel.SUCCESS)) {
       const contextStr = context ? ` ${JSON.stringify(context)}` : ''
       this.consola.success(green(`[SUCCESS] ${message}${contextStr}`))
-      this.logToFile(LogLevel.SUCCESS, message, context)
     }
+    this.toFile(LogLevel.SUCCESS, message, context)
   }
 
   // 警告日志
@@ -175,40 +169,31 @@ export class Logger {
     if (this.enabled(LogLevel.WARN)) {
       const contextStr = context ? ` ${JSON.stringify(context)}` : ''
       this.consola.warn(yellow(`[WARN] ${message}${contextStr}`))
-      this.logToFile(LogLevel.WARN, message, context)
     }
+    this.toFile(LogLevel.WARN, message, context)
   }
 
   // 错误日志
   error(message: string, error?: Error, context?: Record<string, any>): void {
-    if (this.enabled(LogLevel.ERROR)) {
-      const errorMessage = error ? `${message}: ${error.message}` : message
-      const contextObj = { ...(context || {}), ...(error?.stack ? { stack: error.stack } : {}) }
-      const contextStr = contextObj ? ` ${JSON.stringify(contextObj)}` : ''
-      this.consola.error(red(`[ERROR] ${errorMessage}${contextStr}`))
-      this.logToFile(LogLevel.ERROR, errorMessage, contextObj)
-    }
+    const errorMessage = error ? `${message}: ${error.message}` : message
+    const contextObj = { ...(context || {}), ...(error?.stack ? { stack: error.stack } : {}) }
+    const hasContext = Object.keys(contextObj).length > 0
+    if (this.enabled(LogLevel.ERROR))
+      this.consola.error(red(`[ERROR] ${errorMessage}${hasContext ? ` ${JSON.stringify(contextObj)}` : ''}`))
+    this.toFile(LogLevel.ERROR, errorMessage, hasContext ? contextObj : undefined)
   }
 
   // 步骤日志（用于显示同步过程中的主要步骤）
   step(stepNumber: number, message: string): void {
-    if (!this.enabled(LogLevel.INFO))
-      return
-    const formattedMessage = bold(magenta(`
-${stepNumber}. ${message}`))
-    this.consola.log(formattedMessage)
-    this.logToFile(LogLevel.INFO, `Step ${stepNumber}: ${message}`)
+    if (this.enabled(LogLevel.INFO))
+      this.consola.log(bold(magenta(`\n${stepNumber}. ${message}`)))
+    this.toFile('step', `Step ${stepNumber}: ${message}`)
   }
 
   // 更新配置
   updateConfig(config: Partial<LoggerConfig>): void {
     this.config = { ...this.config, ...config }
     this.consola = this.createConsola()
-
-    // 如果开启了日志文件，确保目录存在
-    if (this.config.logToFile) {
-      fs.ensureDirSync(path.dirname(this.config.logFilePath))
-    }
   }
 
   private createConsola(): ConsolaInstance {
@@ -225,3 +210,32 @@ ${stepNumber}. ${message}`))
 
 // 创建默认 logger 实例
 export const logger = new Logger()
+
+/**
+ * Build the file sink a config describes, or `null` when it asks for console-only logging.
+ * Relative paths resolve against `cwd` (the repository root in practice).
+ */
+export function loggingSink(config: LogConfig | undefined, options: { secrets?: (string | undefined)[], cwd?: string } = {}): LogFileSink | null {
+  const file = config?.file?.trim()
+  if (!file)
+    return null
+  const redact = [...(config?.redact ?? []), ...(options.secrets ?? [])].filter((item): item is string => typeof item === 'string' && item.length > 0)
+  return new LogFileSink({
+    ...DEFAULT_LOG_CONFIG,
+    ...config,
+    file: path.isAbsolute(file) ? file : path.resolve(options.cwd ?? process.cwd(), file),
+    redact,
+  })
+}
+
+/**
+ * Point the shared logger at a file, from either the config file or the command line.
+ *
+ * Colour and credentials are stripped on the way in, so what reaches the file is something it is
+ * safe to commit, paste into an issue, or ship to a log aggregator.
+ */
+export function configureLogging(config: LogConfig | undefined, options: { secrets?: (string | undefined)[], cwd?: string } = {}): string | undefined {
+  const sink = loggingSink(config, options)
+  logger.setFileSink(sink)
+  return sink?.path
+}

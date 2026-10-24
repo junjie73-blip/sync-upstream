@@ -2,6 +2,7 @@ import type { Buffer } from 'node:buffer'
 import type { GrayReleaseConfig } from '../domain'
 import { spawn } from 'node:child_process'
 import { toError, ValidationError } from '../errors'
+import { t } from '../i18n'
 import { logger } from '../logger'
 
 export interface ValidationResult {
@@ -69,7 +70,7 @@ export async function validateRelease(
 ): Promise<ValidationResult> {
   const command = config.validationScript?.trim()
   if (!command)
-    throw new ValidationError('启用灰度发布校验时 validationScript 不能为空')
+    throw new ValidationError(t('e.grayValidationEmpty'))
 
   const attempts = Math.max(0, config.maxRetries ?? 0) + 1
   const startedAt = Date.now()

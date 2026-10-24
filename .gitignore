@@ -29,3 +29,5 @@ docs/.vitepress/cache
 docs/.vitepress/temp
 .sync-temp
 .sync-cache
+# 测试覆盖率产物（CI 上传，不进版本库）
+/coverage

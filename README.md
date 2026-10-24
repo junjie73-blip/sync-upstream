@@ -33,6 +33,16 @@ sync-upstream 的三条承诺：**只碰你列出的目录**、**预览看到的
 - **增量运行**：`--incremental` 跳过上次已同步的内容，只处理之后变化的文件；`--force` 忽略基线重新全量比对
 - **失败不扩散**：文件多时批量应用，个别文件失败只标记该文件并保留原因，其余照常完成，修好重跑即可
 - **专属 remote**：上游以名为 `sync-upstream` 的 remote 拉取，绝不改写你的 `origin`
+- **仓库锁**：同一仓库同时只允许一次真实同步，被占用时可按 `--lock-wait` 等待，陈旧锁自动接管
+- **多上游与任意 ref**：`upstreams` 可以列多个仓库按顺序合并，源也可以是标签或提交号
+- **重命名识别**：上游改名同步成"改名"而不是"删一个 + 新增一个"，阈值可调
+- **删除策略**：上游删掉的文件可以跟删（`mirror`）、保留（`keep`）或每次询问（`ask`）
+- **大仓库友好**：partial clone（`--fetch-filter blob`）、浅克隆（`--fetch-depth`）、标签抓取，并识别 Git LFS 指针
+- **撤销**：`--undo` 把上一次真实同步整体退回，历史逐条记录、`history` 可查
+
+### 只读子命令
+- `status`（加 `--fetch` 才联网）、`why <文件>`、`doctor`、`history`：不改任何东西地回答"现在什么状态 / 这个文件为什么没同步 / 环境哪里不对 / 最近做了什么"
+- 四个都支持 `--json`，stdout 只输出那一个 JSON 文档，并会把摘要追加进 `$GITHUB_STEP_SUMMARY`
 
 ### 冲突处理
 - 自动识别 4 类冲突：内容都改（`content`）、一边删一边改（`delete-modify`）、本地未跟踪文件将被覆盖（`untracked-overwrite`）、文件与目录同名（`type`）
@@ -44,26 +54,34 @@ sync-upstream 的三条承诺：**只碰你列出的目录**、**预览看到的
 - **灰度发布**：按百分比 / 目录 / 文件模式先发布一小批，重跑同一比例得到的是同一批文件
 - **一键全量 / 回滚**：`--full-release` 补齐剩下的文件；`--rollback` 把已发布的内容退回发布前——新提交一条回滚提交，不改写已推送的历史
 - **审计**：阶段变迁追加写入 `.sync-gray-audit.jsonl`，可随时改路径
+- **PR 模式**：`--pr` 把改动提交到自动生成的分支并推送，目标分支不动，由评审决定合不合；装了 `gh` / `glab` 时会尝试建 PR，建不了也只给链接
 
 ### 配置与报错
 - **多格式配置**：JSON / JSON5 / YAML / TOML，自动探测 16 个候选文件名，`-C` 可显式指定
+- **引导式 `init`**：回答几个问题就生成一份可用配置，只写你回答过的字段，且先校验再落盘
 - **失败即报错**：指定的配置文件不存在、无权限、解析失败都会终止并报出每种格式的失败原因，绝不静默回落到默认值
 - **聚合校验**：一次性列出所有配置问题（类型错误、路径非法、枚举拼错、区间越界），并对别名键、未识别键给出警告
-- **明确退出码**：0 成功 / 1 有文件应用失败或未预期错误 / 2 配置或参数问题 / 3 git 操作失败（4 为保留码）
-- **Webhook 守护模式**：支持 GitHub / GitLab / Bitbucket / Gitea，签名或 token 校验、IP 白名单、按 IP 限流、1 MiB 请求体上限
+- **中英双语**：`--lang zh|en` 切换帮助与所有错误消息，也按 `SYNC_UPSTREAM_LANG` / `LC_ALL` / `LANG` / `LANGUAGE` 自动判定
+- **Shell 补全**：`sync-upstream completion bash|zsh|fish` 按当前参数表生成补全脚本
+- **明确退出码**：0 成功 / 1 有文件应用失败或未预期错误 / 2 配置或参数问题 / 3 git 操作失败 / 4 在 `init` 问答里取消 / 5 仓库被另一次同步占用
+- **日志落盘**：`--log-file` 写出滚动日志，`--log-max` / `--log-keep` / `--log-json` 控制大小、份数与格式
+- **通知钩子**：HTTP 回调 / Slack / 钉钉 / 企业微信 / stdout，按事件（成功、冲突、失败、撤销）推送
+- **Webhook 守护模式**：支持 GitHub / GitLab / Bitbucket / Gitea，签名或 token 校验、IP 白名单、按 IP 限流、1 MiB 请求体上限（可调）、默认只绑 `127.0.0.1`、`/healthz` 存活探针、投递审计日志与队列上限
 
 ---
 
 ## 30 秒上手
 
 ```bash
-npm install -g sync-upstream
+npm install -g sync-upstream        # 预发布版本：npm install -g sync-upstream@next
 
 cd /path/to/your-repo
-sync-upstream --generate-config          # 生成 sync-upstream.config.json
-# 编辑里面的 upstreamRepo / syncDirs / companyBranch
+sync-upstream init                  # 问答式生成配置（只想拿全字段模板就用 --generate-config）
+# 至少填好 upstreamRepo / syncDirs / companyBranch
+sync-upstream doctor                # 体检：git、远程、权限、配置、状态文件、锁
 sync-upstream --preview-only --verbose   # 先看计划
-sync-upstream                            # 再真正执行
+sync-upstream                       # 再真正执行
+sync-upstream history               # 这次同步留下了什么记录
 ```
 
 也可以零配置直接跑，工具会交互式询问缺少的字段：
@@ -136,7 +154,7 @@ YAML / TOML / JSON5 写法的键名完全一致；`.yaml` 版本可参考 [配�
 | `--preview-only` | `-P` | flag | 只打印计划，不修改任何内容 |
 | `--dry-run` | `-n` | flag | 同 `--preview-only`，用于脚本 |
 | `--config` | `-C` | `<路径>` | 指定配置文件；读取失败直接报错 |
-| `--config-format` | `-F` | `<格式>` | `json`（默认）/ `json5` / `yaml` / `toml`，用于 `-g` 生成 |
+| `--config-format` | `-F` | `<格式>` | `json`（默认）/ `json5` / `yaml` / `toml`，用于 `-g` 与 `init` 的产物 |
 | `--generate-config` | `-g` | flag | 生成默认配置文件后退出 |
 | `--non-interactive` | `-y` | flag | 不提问（配置不完整时仍会补全）；`prompt-user` 冲突降级为保留本地 |
 | `--ignore` | | `<a,b>` | 追加忽略规则（gitignore 语法） |
@@ -162,10 +180,30 @@ YAML / TOML / JSON5 写法的键名完全一致；`.yaml` 版本可参考 [配�
 | `--webhook-secret` | | `<密钥>` | 签名校验密钥，空密钥一律拒绝请求 |
 | `--webhook-events` | | `<a,b>` | 允许的事件（默认 `push`） |
 | `--webhook-branch` | | `<分支>` | 触发同步的分支（默认 `main`） |
+| `--webhook-host` | | `<地址>` | 监听地址，默认 `127.0.0.1`；`--webhook-port 0` 由系统分配端口 |
+| `--webhook-log` | | `<路径>` | 投递审计（JSONL），逐条记录"这次投递做了什么决定" |
+| `--webhook-queue` | | `<n>` | 允许排队等待仓库锁的投递数，默认 8，超出返回 503 |
+| `--delete-policy` | | `<p>` | 上游删除的文件怎么办：`mirror`（默认）/ `keep` / `ask`；`--no-delete` 等于 `keep` |
+| `--rename-threshold` | | `<n>` | 改名识别的相似度门槛，默认 60；`--no-renames` 关闭 |
+| `--fetch-filter` | | `<f>` | partial clone：`none`（默认）/ `blob` / `tree`，大仓首拉明显变快 |
+| `--fetch-depth` | | `<n>` | 浅克隆层数 |
+| `--fetch-tags` | | flag | 一并抓取标签；`--no-fetch-tags` 关闭 |
+| `--lfs` | | `<m>` | `pointer`（默认，保留指针）/ `materialize`（取回实体，需装 git-lfs）/ `off` |
+| `--pr` | | flag | PR 模式：提交到自动分支并推送，目标分支不动；`--no-pr` 关闭 |
+| `--pr-branch` / `--pr-remote` / `--pr-title` / `--pr-body` / `--pr-draft` / `--pr-no-create` | | `<值>` / flag | PR 模式的分支名、远程、标题、正文、草稿、只推不建 |
+| `--notify` | | `<a,b>` | 打开通知并选通道：`http` / `slack` / `dingtalk` / `wecom` / `stdout`；`--no-notify` 关闭 |
+| `--notify-url` / `--notify-events` | | `<值>` | 回调地址与触发事件（地址通常仍应写在配置文件里） |
+| `--lock-wait` | | `<ms>` | 仓库被别的同步占用时最多等多久，默认 `0` 表示立即失败 |
+| `--log-file` / `--log-level` / `--log-max` / `--log-keep` / `--log-json` | | `<值>` | 日志落盘：路径、级别、单文件上限（默认 5 MiB）、保留份数（默认 5）、JSON 格式 |
+| `--undo` | `-uo` | flag | 撤销最近一次真实同步 |
+| `--json` | | flag | 只读子命令输出机器可解析的单个 JSON 文档 |
+| `--lang` | | `<语言>` | `zh` / `en`，切换帮助与错误消息的语言 |
 | `--verbose` | `-V` | flag | verbose 级日志 + 完整变更清单（不含 debug） |
 | `--silent` | `-s` | flag | 只输出错误 |
 | `--version` | `-v` | flag | 显示版本 |
 | `--help` | `-h` | flag | 显示帮助 |
+
+子命令（`status` / `why <路径>` / `doctor` / `history` / `init` / `completion <bash|zsh|fish>`）与 `--no-xxx` 否定写法的完整语义在 [命令行参考](docs/reference/cli.md) 里逐条列出。
 
 未识别的参数会被直接拒绝（退出码 2）并提示使用 `--help`，不会被静默忽略。
 
@@ -175,10 +213,14 @@ YAML / TOML / JSON5 写法的键名完全一致；`.yaml` 版本可参考 [配�
 
 | 对象 | 位置 | 说明 |
 |---|---|---|
-| `.sync-state.json` | 仓库根 | 增量同步的基线；换上游仓库/分支自动作废重建，删掉也安全 |
+| `.sync-state.json` | 仓库根 | 增量同步的基线，并附带每次真实同步的历史记录（`history` 读的就是它）；换上游仓库/分支自动作废重建，删掉不会损坏什么，但增量、历史与 `--undo` 的参照会一起消失 |
+| `.sync-state-<ref>-<hash>.json` | 仓库根 | 多上游（fan-in）时每个上游一份，避免两个上游互相把对方的改动标成"已同步" |
 | `.sync-gray.json` | 仓库根 | 灰度发布进度；**灰度进行中不要删**，全量发布成功后自动删除 |
 | `.sync-gray-audit.jsonl` | 仓库根 | 灰度阶段审计，纯记录，可用 `grayReleaseConfig.auditLogPath` 改路径 |
-| remote `sync-upstream` | `.git/config` | 工具专属的上游 remote，不影响 `origin`，可随时 `git remote remove` |
+| `sync-upstream.lock` | `.git/` 内 | 仓库锁；进程退出即释放，陈旧锁下次获取时自动接管 |
+| 日志文件 | `--log-file` 指定的位置 | 滚动写入，默认 5 MiB × 5 份，删掉不影响功能 |
+| 投递审计 | `webhookConfig.deliveryLog` | Webhook 守护模式的逐条投递决定，纯记录 |
+| remote `sync-upstream` | `.git/config` | 工具专属的上游 remote，不影响 `origin`，可随时 `git remote remove`（多上游时是 `sync-upstream-2` 等） |
 | 提交 | 目标分支 | 只包含本次应用的那些路径，不会把无关的脏文件卷进来 |
 
 内置忽略规则保证 `.sync-state.json`（连同旧版遗留的 `.sync-cache/`、`.sync-temp/`、`.sync-hashes.json`）不会进入同步范围；**两个灰度文件不在其中**，把仓库根当同步目录时请手工排除。使用 `pat` / `user_pass` 认证时，remote URL 会带上凭据——别把 `.git/config` 贴进日志或 issue（日志与报错里的 URL 已自动脱敏）。逐项细节见[运行产物与清理](docs/reference/configuration.md#运行产物与清理)。
@@ -196,6 +238,9 @@ YAML / TOML / JSON5 写法的键名完全一致；`.yaml` 版本可参考 [配�
 | `目标分支 x 既不在本地也不在 origin` | 预览模式不会替你建分支，先 `git branch -r` 确认分支名 |
 | `推送到 origin/xxx 失败` | 检查凭据与分支保护；提交已在本地，可单独 `git push` |
 | 计划为空但预期有变更 | 上一轮已同步过；用 `--force` 忽略 `.sync-state.json` 重新全量比对 |
+| 命令变成英文了 | 机器的 `LANG`/`LC_ALL` 不是中文时按系统语言输出；要固定中文就设 `SYNC_UPSTREAM_LANG=zh` 或每次带 `--lang zh` |
+| `仓库正被另一次同步占用` | 同一仓库只允许一次真实同步；等它结束，或加 `--lock-wait 30000` 排队，`doctor` 会显示锁在谁手里 |
+| `init` 报"需要交互终端" | `init` 是问答式的，带 `--json` / `-y` 或在 CI 里会被拒绝；改用 `--generate-config` 生成模板再编辑 |
 
 日志与退出码细节见 [FAQ](docs/faq.md)，完整字段说明见 [配置参考](docs/reference/configuration.md)。
 
@@ -209,14 +254,14 @@ YAML / TOML / JSON5 写法的键名完全一致；`.yaml` 版本可参考 [配�
 |---|---|---|
 | 选型 | [与 fork 同步的对比](docs/guide/vs-fork-sync.md) | 什么时候用自带 "Fetch upstream" 就够，什么时候需要本工具 |
 | 上手 | [快速开始](docs/guide/quick-start.md) · [安装指南](docs/guide/installation.md) · [配置文件](docs/guide/configuration.md) | 前置条件、安装、生成并填好第一份配置 |
-| 使用 | [使用总览](docs/guide/usage.md) | 一次运行会做什么、各页入口 |
-| 使用 | [日常同步](docs/guide/sync-basics.md) | 预览、交互、应用与提交边界、分支策略 |
+| 使用 | [使用总览](docs/guide/usage.md) | 一次运行会做什么、四个只读子命令、各页入口 |
+| 使用 | [日常同步](docs/guide/sync-basics.md) | 预览、交互、应用与提交边界、分支策略、撤销与改名/删除、大仓抓取 |
 | 使用 | [冲突处理](docs/guide/conflicts.md) | 4 类冲突、5 种策略、自动合并的边界 |
 | 使用 | [灰度发布与回滚](docs/guide/gray-release.md) | 选择策略、阶段与状态、校验、回滚 |
 | 使用 | [Webhook 守护模式](docs/guide/webhook.md) | 请求处理顺序与状态码、签名、事件过滤 |
 | 使用 | [CI 与自动化](docs/guide/automation.md) | 非交互、退出码、日志、并发与重试、失败重来 |
 | 参考 | [命令行参考](docs/reference/cli.md) · [配置参考](docs/reference/configuration.md) · [API 参考](docs/reference/api.md) | 参数、字段、编程入口逐项说明 |
-| 项目 | [功能记录](docs/features.md) · [常见问题](docs/faq.md) · [更新日志](docs/changelog.md) | 功能与限制、排错、变更历史 |
+| 项目 | [功能记录](docs/features.md) · [下一版计划](docs/roadmap.md) · [常见问题](docs/faq.md) · [更新日志](docs/changelog.md) | 功能与限制、计划解除的限制、排错、变更历史 |
 | English | [docs/en/](docs/en/) | 与中文逐页对应的完整英文版 |
 
 - 英文说明：[README.en.md](README.en.md)

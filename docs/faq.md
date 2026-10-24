@@ -25,7 +25,7 @@
 | 非默认分支 / 多个分支 | 一般只针对默认分支；Gitee 在有本地独立提交时不可用 | `-c` 指定任意目标分支，可配分支策略落在 `feature/sync-{date}` 上 |
 | 历史形态 | merge commit（保留上游历史与 merge 关系） | 单条同步提交（同步的是内容，不是历史） |
 
-不适合用它的场景：需要保留上游提交历史、需要 rebase / 线性历史、需要把上游改动开成 PR 给你审、只想一键更新 fork。
+不适合用它的场景：需要保留上游提交历史、需要 rebase / 线性历史、只想一键更新 fork。想"改动先变成 PR 给你审、目标分支不动"的话，现在有能力覆盖：`--pr` 会把同步提交推到一个自动生成的分支并产出 PR，见 [配置参考 prConfig](/reference/configuration#prconfig)。
 
 带具体例子的完整对比见 [与 fork 同步的对比](/guide/vs-fork-sync)。
 
@@ -34,6 +34,10 @@
 Node ≥ 18.2、Git ≥ 2.25。工具直接调用本机 `git`，你的代理、`insteadOf`、凭据助手配置照常生效。
 
 ## 配置
+
+### 配置文件从哪开始写？
+
+两条路。`sync-upstream init` 只问决定同步结果的几项（上游地址、分支、目标分支、同步目录等），把答案写成一个小到能读完的文件；目标文件已存在时要 `--force` 才覆盖，`--json` 或 `-y` 之下会直接拒绝。想要整份默认模板就用 `-g, --generate-config`，格式由 `-F, --config-format json|json5|yaml|toml` 指定。
 
 ### 为什么我的配置文件没生效？
 
@@ -51,9 +55,11 @@ Node ≥ 18.2、Git ≥ 2.25。工具直接调用本机 `git`，你的代理、`
 
 不是只有一条——校验会把所有问题收集完一次性输出（`配置校验失败:` 后面逐行列出）。修完再跑会看到剩下的运行时问题，但那属于另一阶段。
 
-### 缓存 / LFS 的配置项怎么没了？
+### 缓存的配置项怎么没了？LFS 还有配置吗？
 
-重构后删除了缓存层与 LFS 专用配置：同步判定直接依赖 git 的比对结果，缓存不再带来收益；大文件由 git 自身传输，LFS 只需要仓库里的 `.gitattributes`。写 `cacheConfig` 之类的键现在只会收到废弃警告。
+缓存层已经删除：增量判定直接用 git 记录的内容哈希，状态文件本身就是判定依据，单独一层缓存不再带来收益。`cache`、`cacheConfig`、`adaptiveConcurrency` 写了也不会静默失效——会收到一次"已废弃并被忽略"的警告并说明现在靠什么（并发数只由 `concurrencyLimit` 决定）。
+
+LFS 又有了独立配置，但不是老名字：`fetchConfig.lfs` 取 `pointer`（默认，只同步指针文本）、`materialize`（写完指针再用 git-lfs 回取真实内容，需要本机装好且上游 LFS 服务可用）、`off`（完全不检测）。大文件传输本身仍由 git 负责，靠仓库里的 `.gitattributes`。同一节里还有 `filter`（部分抓取）与 `depth`，见 [配置参考 fetchConfig](/reference/configuration#fetchconfig)。
 
 ## 使用
 
@@ -71,7 +77,7 @@ sync-upstream -P -V    # 预览 + 完整清单
 sync-upstream -y -C sync-upstream.config.json
 ```
 
-**`-y` 只在配置完整时保证零提问**：判断条件是 `!nonInteractive || 配置不完整`，而"不完整"指 `upstreamRepo` 为空或 `syncDirs` 为空——缺任一项时即使带 `-y` 也会进入补全问答。另外 `-y` 之下 `prompt-user` 冲突策略会自动降级为"保留本地"并警告，CI 里建议显式指定 `--conflict-strategy`。见 [CI 与自动化](/guide/automation#在-ci-里跑)。
+**`-y` 只在配置完整时保证零提问**：判断条件是 `!nonInteractive || 配置不完整`，而"不完整"指 `upstreamRepo` 为空或 `syncDirs` 为空——缺任一项时即使带 `-y` 也会进入补全问答。想连这种情况也不提问，加 `--json`：机器输出模式禁止问答，会强制非交互，配置不全就直接失败而不是干等输入。另外 `-y` 之下 `prompt-user` 冲突策略会自动降级为"保留本地"并警告，CI 里建议显式指定 `--conflict-strategy`。见 [CI 与自动化](/guide/automation#在-ci-里跑)。
 
 ### 计划显示有变更，但结果是"未提交"
 
@@ -84,15 +90,17 @@ sync-upstream -y -C sync-upstream.config.json
 
 ### 明明上游改了 100 个文件，我只同步到 90 个
 
-看计划尾部的"跳过 … 条"：`被忽略规则排除`、`文件类型不在白名单`、`已是最新`（增量模式）、`不在同步目录内`。另外子模块指针不参与同步。想确认某个文件为何被忽略，先检查根 `.gitignore`、`.syncignore` 以及同步目录内的嵌套 `.gitignore`。
+先看计划尾部的"跳过 … 条"，每条都有名字：`被忽略规则排除`、`文件类型不在白名单`、`不在同步目录内`、`已是最新`（增量模式）、`子模块（gitlink）无法按文件同步`、`上游删除但被删除策略保留`、`本地 core.symlinks=false，符号链接未写入`。想知道**单个文件**的判定，别猜——`sync-upstream why <路径>` 会用真实计划同一次比对的结果回答，结论只有五种：`会同步`、`需要冲突处理`、`不会同步`（附命中了哪条忽略规则及它的来源文件）、`已与上游一致`、`未找到该文件`；加 `--fetch` 先拉上游，加 `--json` 给机器读。整体状态看 `sync-upstream status`（跳过原因按数量汇总），环境是否可用看 `sync-upstream doctor`。
 
 ### 上游把文件搬家了，旧路径会残留吗
 
-不会。上游把文件搬家（内容不变的重命名）时，删除的旧路径和新增的新路径都会被记录进同一次提交，旧路径不会残留。
+默认不会。改名识别开着（`renameDetection: true`，相似度门槛 `renameThreshold: 60`，就是 git 的 `--find-renames`）时，旧路径和新路径作为同一次改名落进同一条提交，预览里显示为 `>` 并带相似度百分比，旧路径不会残留。
+
+改名识别在这几种情况下会被关掉并给出警告：`--no-renames` 显式关闭、`deletePolicy: 'keep'`、灰度进行中、`fetchConfig.depth` 设了浅抓取。这时搬家按"上游删除 + 上游新增"两条处理，新增照常同步，旧路径是否删掉就由删除策略决定——`mirror`（默认）删，`keep` 保留并把它记为 `上游删除但被删除策略保留`，`ask` 在打印计划后逐个问你。见 [配置参考 删除与改名](/reference/configuration#删除与改名)。
 
 ### `.sync-state.json` 可以删吗
 
-可以，它等价于可丢弃的增量缓存，删掉后下一次全量比对即可。也可以直接 `--force` 忽略它。换上游仓库或上游分支时文件会自动重建。落点与清理建议见 [配置参考的运行产物与清理](/reference/configuration#运行产物与清理)。
+可以，它等价于可丢弃的增量缓存：删掉后下一次比对就是全量的（默认 `forceOverwrite: true` 本来也不用它跳过文件，只有 `--incremental` / `"forceOverwrite": false` 才依据它跳过）。换上游仓库或上游分支时文件会自动重建。唯一代价是文件里还记着最近若干次同步的提交（上限 50 条），删了就等于 `sync-upstream history` 没有内容、`-uo` 也找不到可撤销的记录，所以想保留撤销能力就先别删。落点与清理建议见 [配置参考的运行产物与清理](/reference/configuration#运行产物与清理)。
 
 ### 怎么只同步一个目录里的部分文件
 
@@ -101,6 +109,22 @@ sync-upstream -y -C sync-upstream.config.json
 ### 会不会把我没提交的改动一起提交上去
 
 不会。提交只包含本次同步实际应用的路径。同步目录内如果有本地未提交改动，它们会被列为本地改动并可能被判定为冲突，但不会被顺带提交。
+
+### 能不能同时跑两个同步
+
+不能并行，但也不会互相踩到：仓库根的 `.git` 下有一把 `.git/sync-upstream.lock`，第二个进程默认（`lockWaitMs: 0`）立刻以 `5` 号退出码报错并说明持有者的 pid、任务名和开始时间。想让第二个排队，给 `lockWaitMs` 或 `--lock-wait <ms>`；webhook 守护模式本身就是靠这把锁把投递串起来的。残留的锁会自动接管：持有进程已退出时立即接管，进程还在但锁超过 30 分钟才接管（pid 被复用或跨机器 pid 空间的情况）。不确定状态就跑 `sync-upstream doctor`，它会列出「仓库锁被占用」还是「仓库锁空闲」。
+
+### 想同时跟多个上游怎么办
+
+用 `upstreams: [{ repo, branch, dirs, message }]`，也就是 fan-in：每个上游各有自己的抓取远程（`sync-upstream`、`sync-upstream-2`…）、自己的增量状态文件和自己的那条同步提交，目录重叠时按数组顺序后者覆盖前者。命令行上重复 `-r` / `-b` 是同一件事的简写。没写的字段继承顶层配置，而这个列表一旦存在就取代顶层的 `upstreamRepo` / `upstreamBranch`。限制：多上游与灰度发布互斥（`-gr` / `-fr` / `-ro` 会直接报错），各源的状态文件名带引用与哈希、不在内置忽略清单里，建议把 `.sync-state-*.json` 加进 `.gitignore`。见 [配置参考 upstreams](/reference/configuration#多上游-upstreams)。
+
+### 上游仓库很大，抓取太慢太占磁盘
+
+抓什么由 `fetchConfig` 决定：`filter: 'blob'` 走部分抓取，不下载文件内容对象；`filter: 'tree'` 连目录对象也按需；`depth: n` 只取最近 n 个提交（会把本地仓库变浅，同时会关掉改名识别）；`tags` 默认不带标签；上游用 Git LFS 时 `lfs` 取 `pointer`（默认只同步指针文本）/ `materialize`（再用 git-lfs 回取真实内容，需要本机装好且 LFS 服务可用）/ `off`（完全不检测）。命令行对应 `--fetch-filter` / `--fetch-depth` / `--fetch-tags` / `--lfs`。见 [配置参考 fetchConfig](/reference/configuration#fetchconfig)。
+
+### 同步提交能撤销吗
+
+能，两种用法。`sync-upstream history` 列出状态文件里记录的最近几次同步（默认 10 条，`--limit` 调整，`--json` 给机器读）；`sync-upstream -uo`（`--undo`）撤销最近一次记录的同步——用 `git revert` 生成一条新的撤销提交，不改写历史，所以已推送的分支也能安全回退。它只在记录的那条提交仍然是 HEAD 时动手；如果上面又叠了你自己的提交，只会打印 `请手工执行 git revert <commit>` 而不猜测你的意图。撤销成功后会顺手忘掉这些文件的路径，下次同步重新比对，不会被增量状态骗过去。注意 PR 模式不读写增量状态，那次运行不会留下可供 `-uo` 回退的记录——改动只在新分支上，丢弃分支或关掉 PR 即可。
 
 ## 冲突
 
@@ -127,7 +151,7 @@ sync-upstream -y -C sync-upstream.config.json
 
 ### `--full-release` 和 `--rollback` 依赖什么
 
-依赖仓库根的 `.sync-gray.json`。灰度进行中不要删除它；`--full-release` 正常完成后状态会被清理。`--rollback` 需要同时启用 `grayReleaseConfig`，否则报 `--rollback 需要同时启用 grayReleaseConfig`。
+依赖仓库根的 `.sync-gray.json`。灰度进行中不要删除它；`--full-release` 正常完成后状态会被清理。`--rollback` 需要同时启用 `grayReleaseConfig`，否则报 `--rollback 需要同时启用 grayReleaseConfig`。多上游 fan-in（`upstreams`）与灰度互斥，带 `upstreams` 时用 `-gr` / `-fr` / `-ro` 会直接报错，需要灰度就一次只配一个上游。
 
 ### 校验脚本失败会自动回滚吗
 
@@ -139,25 +163,32 @@ sync-upstream -y -C sync-upstream.config.json
 
 三种来源：无法识别平台（缺少 `x-github-event` / `x-gitea-event` / `x-gitlab-event`|`x-gitlab-token` / `x-event-key`，且 `supportedPlatforms` 不止一个平台）、签名缺失或格式不对、签名不匹配。secret 为空时**所有请求都会被拒**，这是有意设计。
 
-### 403 / 429 / 413
+### 403 / 413 / 429 / 503 / 405 / 404
 
-`403` IP 不在 `securityConfig.ipWhitelist`；`429`（或你配置的 `statusCode`）表示请求超出限流速率；`413` 请求体超过 1 MiB。
+- `403`：来源 IP 不在 `webhookConfig.securityConfig.ipWhitelist`
+- `413`：请求体超过上限，默认 1 MiB，可用 `webhookConfig.maxBodyBytes` 调整（最小 1024 字节）
+- `429`：超出限流速率（状态码可被 `webhookConfig.securityConfig.rateLimit.statusCode` 改写）
+- `503`：后台同步队列已满（`webhookConfig.maxQueue`，默认 8）或服务正在退出。这是给平台的重投信号，不是配置错误
+- `405`：非 POST 方法
+- `404`：路径既不是 `webhookConfig.path`，也不是健康检查端点（默认 `/healthz`，`healthPath: false` 可关闭）
 
 ### 200 但没触发同步
 
-响应体里有 `reason`：`非触发分支: xxx` 或 `事件不在允许列表: xxx`，或事件过滤规则未命中。分支比较用的是去掉 `refs/heads/` 的短名。三层过滤的判定顺序见 [事件过滤](/guide/webhook#事件过滤)。
+响应体里有 `reason`：`非触发分支: xxx`、`事件不在允许列表: xxx`、事件过滤规则未命中，或者 `重复投递: xxx`——provider 用同一个 delivery id 重发时，第二次只确认不再同步一遍（`deduplicate` 默认开启，可关掉）。分支比较用的是去掉 `refs/heads/` 的短名。三层过滤的判定顺序见 [事件过滤](/guide/webhook#事件过滤)。
 
 ### 同步失败会不会让服务退出
 
-不会。服务先返回 `202 { accepted: true }`，同步在后台跑，失败只写日志。
-
-### 能不能从环境变量读 secret
-
-不能，工具**不读任何环境变量**。`webhookConfig.secret` 必须是配置里的值，或由 CI/shell 展开成 `--webhook-secret "$SYNC_WEBHOOK_SECRET"`。写在仓库里的配置文件请保证不含真实密钥。
+不会。服务先返回 `202 { accepted: true }`，同步在后台跑，失败只写日志。设置了 `webhookConfig.deliveryLog` 时，失败还会在投递审计里追加一条 `decision` 为 `failed` 的 JSONL 记录，进程退出后依旧能回看；`sync-upstream doctor` 会读出最近一条告诉你服务确实在收投递。
 
 ### 前面有反向代理，IP 白名单和限流按什么算
 
-按 `x-forwarded-for` 的第一跳判定（没有该头时用连接的远端地址）。该头由客户端可控，公网直接暴露时可以被伪造——白名单只应作为纵深防御，前置代理需要负责覆写这个头。
+默认只按**连接的远端地址**判定——代理前面那跳，也就是代理自己的 IP。`x-forwarded-for` 的首跳要显式打开 `webhookConfig.trustProxy: true` 才会被采纳，因为那个头是客户端可控的，直接暴露到公网时可以伪造。所以正确姿势是：保持默认的 `host: 127.0.0.1` 只让本机代理访问，在代理里覆写 `x-forwarded-for`，然后才打开 `trustProxy`；白名单始终只作为纵深防御，别当唯一闸门。`sync-upstream doctor` 会提示这些组合：对外监听却没配 `ipWhitelist`（警告）、`trustProxy=true`（提示它会参与白名单与限流判断）、非回环地址且没有 `tlsCert/tlsKey`（警告）。
+
+### 能不能从环境变量读 secret
+
+不能，凭据**一律不从环境变量读取**：`webhookConfig.secret` 要么是配置里的值，要么由 CI/shell 展开成 `--webhook-secret "$SYNC_WEBHOOK_SECRET"`。写在仓库里的配置文件请保证不含真实密钥。
+
+工具会读这几个非敏感的环境变量，只是行为开关，不含任何凭据：`SYNC_UPSTREAM_LANG`（配合 `LC_ALL` / `LANG` / `LANGUAGE` 决定输出语言，等价于 `--lang`）、`GITHUB_STEP_SUMMARY`（存在时把结果摘要追加写进去）、`SYNC_UPSTREAM_PR_CREATE=0`（关掉 PR 模式的自动创建）。
 
 ## 故障排查
 
@@ -170,27 +201,31 @@ sync-upstream -y -C sync-upstream.config.json
 | `目标分支 x 既不在本地也不在 origin，请先创建后重试` | 预览模式不会替你建分支，先确认分支名 |
 | `认证失败，请检查仓库权限或 --auth 配置` | 检查 token 权限 / 私钥；带口令的私钥请先交给 ssh-agent |
 | `工作区存在未提交改动，git 拒绝了本次操作` | 先提交或暂存本地改动（尤其冲突文件） |
+| `仓库正被另一次同步占用（pid …，任务 …，开始于 …）。等待 Nms 后放弃；确认没有其它进程后可删除 … 强制解锁` | 同一仓库同时只能有一个同步。要么等它结束，要么用 `--lock-wait <ms>` / `lockWaitMs` 排队；持有者已退出时会自动接管，进程还活着但确实是残留文件时才手工删 `.git/sync-upstream.lock`。`sync-upstream doctor` 能看出是谁占着 |
 | `推送到 origin/xxx 失败` | 提交已在本地，检查权限与分支保护后可单独 `git push` |
 
 ### 退出码含义
 
-`0` 成功（含"无变更"、预览运行、以及交互里按 `Ctrl+C` 取消）· `1` 未预期错误或有文件应用失败 · `2` 配置/校验失败或未知命令行参数 · `3` git 操作失败 · `4` 对应用户取消，属**保留码**：取消路径当前直接以 `0` 结束，脚本观测不到 4。分类见 [CI 与自动化](/guide/automation#退出码)。
+`0` 成功（含"无变更"、预览运行、以及同步流程里按 `Ctrl+C` 取消）· `1` 未预期错误或有文件应用失败 · `2` 配置/校验失败或未知命令行参数 · `3` git 操作失败 · `4` 用户取消（当前只有 `sync-upstream init` 里取消会返回它，同步流程的取消仍以 `0` 结束）· `5` 仓库被另一次同步占用。分类见 [CI 与自动化](/guide/automation#退出码)。
 
 ### 怎么看详细日志
 
 ```bash
-sync-upstream -V    # verbose 级别 + 完整变更清单
-sync-upstream -s    # 只保留错误输出
+sync-upstream -V          # verbose 级别 + 完整变更清单
+sync-upstream --debug     # 再降一级，含逐条冲突决策等细节
+sync-upstream -s          # 只保留错误输出
 ```
 
-`-V` 把级别设为 verbose：计划不再截断到 40 条，verbose 级信息放行。它**不包含 debug**——目前唯一的 debug 输出是逐条 `冲突已解决: 路径 → 动作`，命令行没有开关能降到该级别，只有以库方式使用时才看得到。`-V` 与 `-s` 同时给时 `-V` 生效。日志仅输出到控制台，工具不写日志文件。见 [日志](/guide/automation#日志)。
+`-V` 把级别设为 verbose：计划不再截断到 40 条，verbose 级信息放行；`--debug` 比它更细，是命令行专属开关，配置文件里没有对应键（不会某天被一份配置意外打开）。`-s` 优先级最高，`-V` 次之。
+
+想留证据就落盘：`--log-file <路径>` 或 `logConfig.file` 会把日志同时写进文件，可用 `--log-level`（默认 `info`，想收 debug 行就填 `debug`）、`--log-json`（每行一个 JSON 对象）、`--log-max`（默认 5 MiB）、`--log-keep`（默认留 5 份轮转文件）调节；写进文件的行会先去掉颜色码，再把 URL 里的账号口令、`token=` / `secret=` / `Bearer` 这类值打码。控制台级别与文件级别互相独立。见 [日志](/guide/automation#日志) 与 [配置参考 logConfig](/reference/configuration#logconfig)。
 
 ### 出问题后想干净重来
 
 1. `git status` 看工作区（工具提交后仍可能有冲突标记文件待你处理）
 2. `git log -1 --stat` 看那次同步提交到底带了哪些路径
-3. 需要撤销：`git reset --hard HEAD~1`（自己确认清楚再执行），灰度场景优先用 `sync-upstream -gr --rollback`
-4. 可选：删除 `.sync-state.json` 后 `--force` 重跑
+3. 需要撤销：优先 `sync-upstream -uo`，它生成一条 revert 提交、不改写历史，已推送也安全；只有确认这条同步提交还只在本地时才用 `git reset --hard HEAD~1`。灰度场景用 `sync-upstream -gr --rollback`
+4. 可选：删除 `.sync-state.json` 后重跑（下一次本来就是全量比对），代价是丢掉 `history` / `-uo` 依赖的同步记录
 
 ### 会不会动我的 `origin`
 

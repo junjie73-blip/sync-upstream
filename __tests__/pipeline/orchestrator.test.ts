@@ -1,9 +1,13 @@
 import type { SyncConfig } from '../../src/domain'
 import type { Fixture } from '../helpers/repo'
+import path from 'node:path'
+import fs from 'fs-extra'
 import { resolveConfig } from '../../src/config/resolve'
-import { ConflictResolutionStrategy, GrayReleaseStrategy } from '../../src/domain'
-import { GitError } from '../../src/errors'
+import { ChangeKind, ConflictResolutionStrategy, GrayReleaseStrategy } from '../../src/domain'
+import { GitError, LockError } from '../../src/errors'
+import { GitRepository } from '../../src/git/repository'
 import { SyncOrchestrator, UPSTREAM_REMOTE } from '../../src/pipeline/orchestrator'
+import { acquireRepoLock } from '../../src/pipeline/repo-lock'
 import { createFixture } from '../helpers/repo'
 
 let up: Fixture
@@ -104,7 +108,8 @@ describe('SyncOrchestrator 预览', () => {
     }).run()
 
     await expect(run()).rejects.toBeInstanceOf(GitError)
-    await expect(run()).rejects.toThrow(/no-such-branch[\s\S]*远端分支不存在/)
+    // 普通写法会先当分支再当标签试一次，所以错误里两样都提。
+    await expect(run()).rejects.toThrow(/no-such-branch[\s\S]*没有分支或标签/)
   })
 
   it('目标分支既不在本地也不在 origin 时提示先创建', async () => {
@@ -228,10 +233,141 @@ describe('SyncOrchestrator 冲突决策', () => {
   })
 })
 
+describe('SyncOrchestrator 正确性回归', () => {
+  it('只改可执行位（内容不变）也能同步——oid 相同不代表没变化', async () => {
+    await up.gitRaw(['checkout', '-q', 'main'])
+    await up.write('src/config/tool.sh', 'echo hi\n')
+    await up.commitAll('add script')
+    await new SyncOrchestrator({ config: config(), cwd: down.root }).run()
+    expect(down.gitRaw(['ls-tree', 'HEAD', 'src/config/tool.sh'])).toMatch(/^100644/)
+
+    up.gitRaw(['update-index', '--chmod=+x', '--', 'src/config/tool.sh'])
+    await up.commitStaged('make script executable')
+
+    const result = await new SyncOrchestrator({ config: config(), cwd: down.root }).run()
+    expect(result.plan.changes.map(item => item.path)).toEqual(['src/config/tool.sh'])
+    expect(result.plan.changes[0]).toMatchObject({
+      kind: ChangeKind.MODIFY,
+      upstreamMode: '100755',
+      targetMode: '100644',
+    })
+    expect(down.gitRaw(['ls-tree', 'HEAD', 'src/config/tool.sh'])).toMatch(/^100755/)
+  })
+
+  it('增量模式下 mode 变化不会被"已同步"吞掉', async () => {
+    await up.gitRaw(['checkout', '-q', 'main'])
+    await up.write('src/config/tool.sh', 'echo hi\n')
+    await up.commitAll('add script')
+    const incremental = config({ forceOverwrite: false })
+    await new SyncOrchestrator({ config: incremental, cwd: down.root }).run()
+
+    up.gitRaw(['update-index', '--chmod=+x', '--', 'src/config/tool.sh'])
+    await up.commitStaged('make script executable')
+
+    const second = await new SyncOrchestrator({ config: incremental, cwd: down.root }).run()
+    expect(second.plan.changes.map(item => item.path)).toEqual(['src/config/tool.sh'])
+    expect(second.plan.skipped.find(item => item.path === 'src/config/tool.sh')).toBeUndefined()
+  })
+
+  it('子模块与本地不支持的符号链接记为 skipped，不再静默消失', async () => {
+    await up.gitRaw(['checkout', '-q', 'main'])
+    up.gitRaw(['update-index', '--add', '--cacheinfo', `160000,${up.gitRaw(['rev-parse', 'HEAD'])},src/config/vendor`])
+    await up.indexSymlink('src/config/alias', 'a.ts')
+    await up.commitStaged('add gitlink + symlink')
+
+    // 明确关掉符号链接支持，让断言与机器无关
+    down.gitRaw(['config', 'core.symlinks', 'false'])
+
+    const result = await new SyncOrchestrator({ config: config({ previewOnly: true }), cwd: down.root }).run()
+    expect(result.plan.changes.map(item => item.path)).not.toContain('src/config/vendor')
+    expect(result.plan.skipped).toEqual(expect.arrayContaining([
+      { path: 'src/config/vendor', reason: 'submodule', detail: expect.stringContaining('git submodule') },
+      { path: 'src/config/alias', reason: 'symlink-unsupported', detail: expect.stringContaining('core.symlinks') },
+    ]))
+  })
+
+  it('仓库被另一个进程占用时直接失败，一个字节都不动', async () => {
+    await upstreamDrift()
+    const gitDir = await new GitRepository(down.root).gitDirectory()
+    const held = await acquireRepoLock({ gitDir, label: 'webhook 触发的同步' })
+    try {
+      const error = await new SyncOrchestrator({ config: config(), cwd: down.root }).run().then(() => null, (caught: unknown) => caught)
+      expect(error).toBeInstanceOf(LockError)
+      expect((error as LockError).message).toContain('webhook 触发的同步')
+      expect(await down.exists('src/config/new.ts')).toBe(false)
+      expect(down.gitRaw(['rev-list', '--count', 'company'])).toBe('1')
+    }
+    finally {
+      await held.release()
+    }
+  })
+
+  it('lockWaitMs 让手动运行排队等待，而不是把 webhook 的同步挤掉', async () => {
+    await upstreamDrift()
+    const gitDir = await new GitRepository(down.root).gitDirectory()
+    const held = await acquireRepoLock({ gitDir, label: 'webhook 触发的同步' })
+    const releaseSoon = (async () => {
+      await new Promise(resolve => setTimeout(resolve, 100))
+      await held.release()
+    })()
+
+    try {
+      const result = await new SyncOrchestrator({
+        config: config({ lockWaitMs: 10_000 }),
+        cwd: down.root,
+      }).run()
+      expect(result.commit?.created).toBe(true)
+    }
+    finally {
+      await releaseSoon
+    }
+  })
+
+  it('resolutionLogFile 真的落盘（以前只是文档里的一个字段）', async () => {
+    await upstreamDrift()
+    await down.write('src/config/a.ts', 'line one local\nline two\nline three\n')
+
+    await new SyncOrchestrator({
+      config: config({ conflictResolutionConfig: { resolutionLogFile: 'logs/conflicts.jsonl' } }),
+      cwd: down.root,
+    }).run()
+
+    const lines = (await fs.readFile(path.join(down.root, 'logs/conflicts.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line) as Record<string, unknown>)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({ path: 'src/config/a.ts', action: 'keep-local' })
+    expect(typeof lines[0].at).toBe('string')
+  })
+})
+
 describe('SyncOrchestrator 分支策略与回滚', () => {
   it('启用分支策略时在生成的分支上提交，目标分支保持不变', async () => {
     await upstreamDrift()
     const before = down.gitRaw(['rev-parse', 'company'])
+
+    const result = await new SyncOrchestrator({
+      config: config({
+        branchStrategyConfig: {
+          enable: true,
+          strategy: 'feature',
+          baseBranch: 'company',
+          branchPattern: 'feature/sync-{strategy}',
+          autoSwitchBack: false,
+        },
+      }),
+      cwd: down.root,
+    }).run()
+
+    expect(down.gitRaw(['branch', '--show-current'])).toBe('feature/sync-feature')
+    expect(down.gitRaw(['rev-parse', 'company'])).toBe(before)
+    expect(result.commit?.created).toBe(true)
+  })
+
+  it('autoSwitchBack 是默认行为：跑完回到运行前所在分支', async () => {
+    await upstreamDrift()
+    down.gitRaw(['checkout', '-q', '-b', 'daily-work'])
 
     const result = await new SyncOrchestrator({
       config: config({
@@ -245,9 +381,58 @@ describe('SyncOrchestrator 分支策略与回滚', () => {
       cwd: down.root,
     }).run()
 
+    // 同步提交落在生成的分支上，但用户不会被留在陌生分支里
+    expect(result.startedOn).toBe('daily-work')
+    expect(result.endedOn).toBe('daily-work')
+    expect(down.gitRaw(['branch', '--show-current'])).toBe('daily-work')
+    expect(down.gitRaw(['rev-parse', 'feature/sync-feature'])).toBe(result.commit?.hash)
+    expect(down.gitRaw(['rev-parse', 'company'])).not.toBe(result.commit?.hash)
+  })
+
+  it('autoDeleteMergedBranches 只清理本工具生成的、已并入目标的分支', async () => {
+    await upstreamDrift()
+    // 上一次同步留下的、已并入 company 的生成分支
+    down.gitRaw(['branch', 'feature/sync-old', 'company'])
+    // 用户自己的分支即使已合并也不能被删
+    down.gitRaw(['branch', 'hotfix/keep-me', 'company'])
+
+    await new SyncOrchestrator({
+      config: config({
+        branchStrategyConfig: {
+          enable: true,
+          strategy: 'feature',
+          baseBranch: 'company',
+          branchPattern: 'feature/sync-{strategy}',
+          autoDeleteMergedBranches: true,
+        },
+      }),
+      cwd: down.root,
+    }).run()
+
+    expect(down.gitRaw(['branch', '--list', 'feature/sync-old']).trim()).toBe('')
+    expect(down.gitRaw(['branch', '--list', 'hotfix/keep-me']).trim()).toContain('hotfix/keep-me')
+  })
+
+  it('未开启时既不切回也不删分支（保持显式开关的语义）', async () => {
+    await upstreamDrift()
+    down.gitRaw(['branch', 'feature/sync-old', 'company'])
+
+    await new SyncOrchestrator({
+      config: config({
+        branchStrategyConfig: {
+          enable: true,
+          strategy: 'feature',
+          baseBranch: 'company',
+          branchPattern: 'feature/sync-{strategy}',
+          autoSwitchBack: false,
+          autoDeleteMergedBranches: false,
+        },
+      }),
+      cwd: down.root,
+    }).run()
+
     expect(down.gitRaw(['branch', '--show-current'])).toBe('feature/sync-feature')
-    expect(down.gitRaw(['rev-parse', 'company'])).toBe(before)
-    expect(result.commit?.created).toBe(true)
+    expect(down.gitRaw(['branch', '--list', 'feature/sync-old']).trim()).toContain('feature/sync-old')
   })
 
   it('灰度发布只先落金丝雀子集，fullRelease 再补齐其余文件', async () => {

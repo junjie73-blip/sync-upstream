@@ -2,6 +2,7 @@ import tomlParser from '@iarna/toml'
 import yaml from 'js-yaml'
 import json5 from 'json5'
 import { ConfigError } from '../errors'
+import { t } from '../i18n'
 
 export type ConfigFormat = 'json' | 'json5' | 'yaml' | 'toml'
 
@@ -53,7 +54,7 @@ export function parseConfigContent(content: string, fileName: string): Record<st
   }
 
   throw new ConfigError(
-    `配置文件 ${fileName} 解析失败`,
+    t('c.parseFailed', { file: fileName }),
     undefined,
     {
       fileName,
@@ -69,10 +70,14 @@ function stripBom(content: string): string {
 
 function assertPlainObject(parsed: unknown, fileName: string, format: ConfigFormat): Record<string, unknown> {
   if (parsed === null || parsed === undefined) {
-    throw new ConfigError(`配置文件 ${fileName} (${format}) 内容为空`)
+    throw new ConfigError(t('c.parseEmpty', { file: fileName, format }))
   }
   if (typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new ConfigError(`配置文件 ${fileName} (${format}) 顶层必须是对象，实际是 ${Array.isArray(parsed) ? 'array' : typeof parsed}`)
+    throw new ConfigError(t('c.parseNotObject', {
+      file: fileName,
+      format,
+      type: Array.isArray(parsed) ? 'array' : typeof parsed,
+    }))
   }
   return parsed as Record<string, unknown>
 }

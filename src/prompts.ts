@@ -3,10 +3,11 @@ import process from 'node:process'
 import { blue, bold, cyan, green, magenta, yellow } from 'picocolors'
 import prompts from 'prompts'
 import { ConflictResolutionStrategy } from './domain'
+import { t } from './i18n'
 import { logger } from './logger'
 
 function cancelled(): never {
-  logger.warn(yellow('操作已取消'))
+  logger.warn(yellow(t('cli.aborted')))
   process.exit(0)
 }
 
@@ -100,6 +101,20 @@ export const conflictPrompt: ConflictPrompt = async (candidate: ConflictCandidat
   return (answer.strategy as ConflictResolutionStrategy | undefined) ?? null
 }
 
+/**
+ * The `deletePolicy: 'ask'` question. Cancelling counts as "do not delete": a file kept today can
+ * still be deleted by the next run, while a file removed by mistake is gone from the branch.
+ */
+export async function confirmDeletesPrompt(count: number): Promise<boolean> {
+  const { answer } = await prompts({
+    type: 'confirm',
+    name: 'answer',
+    message: `上游删除了 ${count} 个文件，本次是否同步删除?（选“否”则保留本地文件）`,
+    initial: false,
+  }, { onCancel: () => undefined })
+  return answer === true
+}
+
 export function displaySummary(config: SyncConfig, source: string | null): void {
   logger.info(bold(blue('\n🔍 配置摘要:')))
   logger.info(cyan(`  - 配置文件: ${source ?? '（未找到，使用默认值 + 命令行）'}`))
@@ -113,6 +128,11 @@ export function displaySummary(config: SyncConfig, source: string | null): void 
   logger.info(yellow(`  - 预览模式: ${config.previewOnly ? '启用' : '禁用'}`))
   logger.info(blue(`  - 重试: ${config.retryConfig.maxRetries} 次，初始 ${config.retryConfig.initialDelay}ms，因子 ${config.retryConfig.backoffFactor}`))
   logger.info(blue(`  - 冲突策略: ${config.conflictResolutionConfig.defaultStrategy}`))
+  logger.info(blue(`  - 删除策略: ${config.deletePolicy}（上游删除的文件${config.deletePolicy === 'keep' ? '保留本地' : config.deletePolicy === 'ask' ? '每次询问' : '同步删除'}）`))
+  logger.info(blue(`  - 重命名识别: ${config.renameDetection ? `开启（阈值 ${config.renameThreshold}%）` : '关闭（改名按删除+新增处理）'}`))
+  if (config.prConfig?.enable) {
+    logger.info(bold(yellow(`  - PR 模式: 改动提交到自动分支并推送，目标分支 ${config.companyBranch} 不改动`)))
+  }
   if (config.grayReleaseConfig?.enable) {
     logger.info(bold(yellow(`  - 灰度发布: ${config.grayReleaseConfig.strategy} ${config.grayReleaseConfig.percentage ?? ''}%`)))
   }

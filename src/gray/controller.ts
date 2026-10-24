@@ -10,6 +10,7 @@ import type {
 import type { GitRepository } from '../git/repository'
 import path from 'node:path'
 import { GrayReleaseStage } from '../domain'
+import { t } from '../i18n'
 import { logger } from '../logger'
 import { GrayAudit } from './audit'
 import { GrayMonitor } from './monitor'
@@ -52,7 +53,7 @@ export class GrayController {
   static async create(deps: GrayControllerDeps): Promise<GrayController> {
     const config = deps.config.grayReleaseConfig
     if (!config?.enable)
-      throw new Error('grayReleaseConfig.enable 为 false，无需创建 GrayController')
+      throw new Error(t('e.grayControllerDisabled'))
     const state = await GrayState.open(
       GrayState.pathFor(deps.repoRoot),
       deps.config,

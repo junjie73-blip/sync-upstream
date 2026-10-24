@@ -39,9 +39,34 @@ export const CONFIG_ALIASES: Record<string, AliasRule> = {
   previewMode: { target: 'previewOnly', kind: 'boolean' },
   preview: { target: 'previewOnly', kind: 'boolean' },
   yes: { target: 'nonInteractive', kind: 'boolean' },
+  deletions: { target: 'deletePolicy', kind: 'string' },
+  renames: { target: 'renameDetection', kind: 'boolean' },
+  findRenames: { target: 'renameDetection', kind: 'boolean' },
+  pr: { target: 'prConfig' },
+  pullRequest: { target: 'prConfig' },
+  fetch: { target: 'fetchConfig' },
+  clone: { target: 'fetchConfig' },
+  partialClone: { target: 'fetchConfig.filter', kind: 'string' },
+  cloneFilter: { target: 'fetchConfig.filter', kind: 'string' },
+  fetchDepth: { target: 'fetchConfig.depth', kind: 'number' },
+  fetchTags: { target: 'fetchConfig.tags', kind: 'boolean' },
+  lfs: { target: 'fetchConfig.lfs', kind: 'string' },
+  lfsMode: { target: 'fetchConfig.lfs', kind: 'string' },
+  log: { target: 'logConfig' },
+  logging: { target: 'logConfig' },
+  logFile: { target: 'logConfig.file', kind: 'string' },
+  logLevel: { target: 'logConfig.level', kind: 'string' },
+  logJson: { target: 'logConfig.json', kind: 'boolean' },
+  logMaxBytes: { target: 'logConfig.maxBytes', kind: 'number' },
+  logRotate: { target: 'logConfig.maxBytes', kind: 'number' },
+  logKeep: { target: 'logConfig.keep', kind: 'number' },
+  webhookLog: { target: 'webhookConfig.deliveryLog', kind: 'string' },
+  webhookQueue: { target: 'webhookConfig.maxQueue', kind: 'number' },
   grayRelease: { target: 'grayReleaseConfig' },
   conflictResolution: { target: 'conflictResolutionConfig' },
   webhook: { target: 'webhookConfig' },
+  notify: { target: 'notifyConfig' },
+  notifications: { target: 'notifyConfig' },
   branchStrategy: { target: 'branchStrategyConfig' },
 }
 
@@ -58,16 +83,27 @@ export interface NormalizationResult {
   errors: string[]
 }
 
-function setByPath(target: Record<string, any>, dottedPath: string, value: unknown) {
+/**
+ * Write a dotted path without touching objects the caller still owns.
+ *
+ * Non-alias keys are copied by reference, so a plain `node[leaf] = value` would write straight
+ * through into the caller's own section: a file that spells `webhookConfig` *and* uses the
+ * `webhookLog` alias would leave the alias' value inside the object somebody passed in, and
+ * anything holding on to it — a re-resolved runtime config, a test fixture — sees a mutation nobody
+ * asked for. Every object on the path is replaced with a copy instead.
+ */
+function setByPath(root: Record<string, any>, dottedPath: string, value: unknown): void {
   const segments = dottedPath.split('.')
-  let node = target
+  let node = root
   for (const segment of segments.slice(0, -1)) {
-    if (typeof node[segment] !== 'object' || node[segment] === null)
-      node[segment] = {}
-    node = node[segment]
+    const child = node[segment]
+    // Two aliases into the same section each take their own copy; the second copy keeps what the
+    // first already wrote, so `fetchDepth` and `fetchTags` still end up in one `fetchConfig`.
+    const next: Record<string, unknown> = child && typeof child === 'object' && !Array.isArray(child) ? { ...child } : {}
+    node[segment] = next
+    node = next
   }
-  const leaf = segments[segments.length - 1]
-  node[leaf] = value
+  node[segments[segments.length - 1]] = value
 }
 
 function getByPath(source: Record<string, any>, dottedPath: string): unknown {
@@ -140,8 +176,21 @@ export function normalizeConfigKeys(raw: Record<string, unknown>): Normalization
   return { value: output as RawSyncConfig, warnings, errors }
 }
 
-/** Canonical top-level keys, so a correctly spelled option is never reported as a typo. */
-export const CANONICAL_KEYS = new Set<string>(Object.keys(DEFAULT_CONFIG))
+/**
+ * Canonical top-level keys, so a correctly spelled option is never reported as a typo.
+ * `DEFAULT_CONFIG` only carries the sections it can supply defaults for, so the optional
+ * sections are listed here as well — spelling `webhookConfig` correctly must not produce an
+ * "unrecognised key" warning while the value is being applied anyway.
+ */
+export const CANONICAL_KEYS = new Set<string>([
+  ...Object.keys(DEFAULT_CONFIG),
+  'authConfig',
+  'grayReleaseConfig',
+  'webhookConfig',
+  'notifyConfig',
+  'prConfig',
+  'upstreams',
+])
 
 export function isKnownKey(key: string): boolean {
   return key in CONFIG_ALIASES || CANONICAL_KEYS.has(key)

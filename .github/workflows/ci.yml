@@ -1,0 +1,129 @@
+name: CI
+
+# 每次 push / PR 都跑：构建 + 类型检查 + 跨平台测试 + 覆盖率阈值。
+# 三个操作系统都要跑，是因为这个工具的核心行为依赖 git 与文件系统
+# （pathspec、文件 mode、换行、锁文件），这些正是 Windows 与 Linux 容易分叉的地方。
+on:
+  push:
+    branches:
+      - master
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: 类型检查与 Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Lint
+        run: pnpm run lint
+
+  test:
+    name: 测试（${{ matrix.os }} / Node ${{ matrix.node }}）
+    needs: static
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+        node:
+          - '20'
+          - '22'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Test
+        run: pnpm run test:ci
+
+      - name: Upload coverage
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '22'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/lcov.info
+          if-no-files-found: error
+
+  smoke:
+    name: 打包产物冒烟
+    needs: static
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      # 打过的 tag 会触发发布，所以这里先确认 dist 里的 CLI 真能跑起来。
+      - name: CLI smoke
+        run: |
+          node dist/cli.js --version
+          node dist/cli.js --help
+          node dist/cli.js --lang en --help
+          node dist/cli.js completion bash
+          node dist/cli.js completion zsh
+          node dist/cli.js completion fish
+          node dist/cli.js status --json || true

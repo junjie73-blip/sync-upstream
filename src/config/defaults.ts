@@ -1,5 +1,18 @@
-import type { SyncConfig } from '../domain'
-import { BranchStrategy, ConflictResolutionStrategy } from '../domain'
+import type { NotifyConfig, SyncConfig } from '../domain'
+import { BranchStrategy, ConflictResolutionStrategy, DEFAULT_FETCH_CONFIG, DEFAULT_RENAME_THRESHOLD } from '../domain'
+
+/**
+ * `channels` starts empty on purpose: enabling notifications without naming a channel is a
+ * mistake worth reporting, not a hint about what the user probably meant.
+ */
+export const DEFAULT_NOTIFY_CONFIG: NotifyConfig = {
+  enable: false,
+  channels: [],
+  events: ['success', 'conflict', 'failure', 'undo'],
+  timeoutMs: 5000,
+  retries: 2,
+  includeDetails: true,
+}
 
 export const DEFAULT_CONFIG: SyncConfig = {
   upstreamRepo: '',
@@ -15,8 +28,12 @@ export const DEFAULT_CONFIG: SyncConfig = {
   previewOnly: false,
   nonInteractive: false,
   concurrencyLimit: 10,
+  lockWaitMs: 0,
   includeFileTypes: [],
   ignorePatterns: [],
+  deletePolicy: 'mirror',
+  renameDetection: true,
+  renameThreshold: DEFAULT_RENAME_THRESHOLD,
   retryConfig: {
     maxRetries: 3,
     initialDelay: 2000,
@@ -27,6 +44,7 @@ export const DEFAULT_CONFIG: SyncConfig = {
     autoResolveTypes: [],
     logResolutions: true,
   },
+  fetchConfig: DEFAULT_FETCH_CONFIG,
   branchStrategyConfig: {
     enable: false,
     strategy: BranchStrategy.FEATURE,
@@ -37,6 +55,7 @@ export const DEFAULT_CONFIG: SyncConfig = {
   },
   fullRelease: false,
   rollback: false,
+  notifyConfig: DEFAULT_NOTIFY_CONFIG,
 }
 
 export const CONFIG_FILE_NAMES = [

@@ -144,7 +144,7 @@ describe('webhookServer.handle', () => {
 
   it('x-forwarded-for 首跳参与白名单判断', async () => {
     const server = new WebhookServer(
-      makeConfig({ securityConfig: { ipWhitelist: ['10.0.0.0/8'], rateLimit: { maxRequestsPerSecond: 100, statusCode: 429, message: 'x' } } }),
+      makeConfig({ trustProxy: true, securityConfig: { ipWhitelist: ['10.0.0.0/8'], rateLimit: { maxRequestsPerSecond: 100, statusCode: 429, message: 'x' } } }),
       { onSync },
     )
     const { res, statusCode } = makeRes()
@@ -154,6 +154,20 @@ describe('webhookServer.handle', () => {
     }), res)
     expect(statusCode()).toBe(202)
     await flushAsync()
+  })
+
+  it('未开启 trustProxy 时伪造的 x-forwarded-for 被忽略', async () => {
+    const server = new WebhookServer(
+      makeConfig({ securityConfig: { ipWhitelist: ['10.0.0.0/8'], rateLimit: { maxRequestsPerSecond: 100, statusCode: 429, message: 'x' } } }),
+      { onSync },
+    )
+    const { res, statusCode } = makeRes()
+    await server.handle(makeReq({
+      headers: { ...signedGitHubHeaders(PUSH_BODY), 'x-forwarded-for': '10.1.2.3' },
+      body: PUSH_BODY,
+    }), res)
+    expect(statusCode()).toBe(403)
+    expect(onSync).not.toHaveBeenCalled()
   })
 
   it('超出限流返回配置的状态码与消息', async () => {

@@ -10,6 +10,7 @@ import type {
 import crypto from 'node:crypto'
 import { GrayReleaseStage, GrayReleaseStrategy } from '../domain'
 import { ValidationError } from '../errors'
+import { t } from '../i18n'
 import { newReleaseId } from './state'
 
 /** Deterministic bucket in [0, 100) for a path, so re-running a plan picks the same canary set. */
@@ -40,19 +41,19 @@ function matchFile(repoPath: RepoPath, patterns: RepoPath[]): boolean {
  */
 export function selectCanary(plan: SyncPlan, config: GrayReleaseConfig): GrayReleaseSelection {
   if (!Number.isFinite(config.percentage) && config.strategy === GrayReleaseStrategy.PERCENTAGE) {
-    throw new ValidationError('灰度发布 percentage 缺失或不是数字')
+    throw new ValidationError(t('e.grayPctMissing'))
   }
   if (config.strategy === GrayReleaseStrategy.PERCENTAGE) {
     const percentage = config.percentage as number
     if (percentage <= 0 || percentage > 100) {
-      throw new ValidationError(`灰度发布 percentage 必须在 (0, 100] 区间，实际是 ${JSON.stringify(percentage)}`)
+      throw new ValidationError(t('e.grayPctRange', { value: JSON.stringify(percentage) }))
     }
   }
   if (config.strategy === GrayReleaseStrategy.DIRECTORY && (config.canaryDirs ?? []).length === 0) {
-    throw new ValidationError('DIRECTORY 灰度策略需要至少一个 canaryDirs 目录')
+    throw new ValidationError(t('e.grayNeedsCanaryDirs'))
   }
   if (config.strategy === GrayReleaseStrategy.FILE && (config.filePatterns ?? []).length === 0) {
-    throw new ValidationError('FILE 灰度策略需要至少一个 filePatterns 模式')
+    throw new ValidationError(t('e.grayNeedsFilePatterns'))
   }
 
   const canary: ChangeEntry[] = []
@@ -62,7 +63,7 @@ export function selectCanary(plan: SyncPlan, config: GrayReleaseConfig): GrayRel
   }
 
   if (canary.length === 0) {
-    throw new ValidationError('灰度选择结果为空：当前计划没有任何文件落入金丝雀集合，请调整 percentage/canaryDirs/filePatterns')
+    throw new ValidationError(t('e.grayEmptySelection'))
   }
 
   const canaryPaths = new Set(canary.map(entry => entry.path))

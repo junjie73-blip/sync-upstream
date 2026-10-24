@@ -24,7 +24,7 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 8 # 指定你想要的 pnpm 版本
+          version: 9 # 与 ci.yml / npm-publish.yml 保持一致，lockfileVersion 9 需要 pnpm 9
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -49,7 +49,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     needs: build
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
