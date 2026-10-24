@@ -258,7 +258,10 @@ describe('writeConfigFile / generateDefaultConfig', () => {
     process.chdir(tmpDir)
     try {
       const saved = await saveConfig(VALID, 'json')
-      expect(saved).toBe(path.join(fs.realpathSync(tmpDir), 'sync-upstream.config.json'))
+      // 两侧都取 realpath：macOS 的 /var → /private/var、Windows 运行器里的 RUNNER~1 这类
+      // 短名会让临时目录的原始形式和真实形式不一致，直接比较字符串只在部分机器上成立。
+      expect(path.basename(saved)).toBe('sync-upstream.config.json')
+      expect(fs.realpathSync(path.dirname(saved))).toBe(fs.realpathSync(tmpDir))
       expect(await fs.pathExists(saved)).toBe(true)
     }
     finally {
