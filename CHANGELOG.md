@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.0-beta.0](https://github.com/junjie73-blip/sync-upstream/compare/v0.2.8-0...v0.3.0-beta.0) (2026-10-24)
+
+### ✨ Features | 新功能
+
+* ✨ 0.3.0 只读子命令、撤销、通知、多上游与发布加固 ([e29f3f0](https://github.com/junjie73-blip/sync-upstream/commit/e29f3f0cb84f58535957e0f84888760984942d7e))
+
 ## [0.2.8-0](https://github.com/junjie73-blip/sync-upstream/compare/v0.2.7...v0.2.8-0) (2026-10-05)
 
 ### 🐛 Bug Fixes | Bug 修复
