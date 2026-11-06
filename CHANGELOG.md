@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.0-beta.1](https://github.com/junjie73-blip/sync-upstream/compare/v0.3.0-beta.0...v0.3.0-beta.1) (2026-11-06)
+
+### 🐛 Bug Fixes | Bug 修复
+
+* 🐛 补齐 lockfile 并去掉依赖临时目录形式的断言 ([2a178db](https://github.com/junjie73-blip/sync-upstream/commit/2a178db65c3ad9492b72325b367b6ea2e9a5d4a3))
+
+### ⚡ Performance Improvements | 性能优化
+
+* ⚡️ 提交内容 ([a2b0a8c](https://github.com/junjie73-blip/sync-upstream/commit/a2b0a8ccb2f619457b7e887d31115e4936671a46))
+
 ## [0.3.0-beta.0](https://github.com/junjie73-blip/sync-upstream/compare/v0.2.8-0...v0.3.0-beta.0) (2026-10-24)
 
 ### ✨ Features | 新功能
