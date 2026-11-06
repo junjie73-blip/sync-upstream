@@ -7,7 +7,7 @@
   "homepage": "https://github.com/junjie73-blip/sync-upstream.git",
   "repository": {
     "type": "git",
-    "url": "https://github.com/junjie73-blip/sync-upstream.git"
+    "url": "git+https://github.com/junjie73-blip/sync-upstream.git"
   },
   "bugs": {
     "url": "https://github.com/junjie73-blip/sync-upstream/issues"
